@@ -1,280 +1,1205 @@
-* { margin:0; padding:0; box-sizing:border-box; }
+* {
+  margin:0; padding:0; box-sizing:border-box;
+  -webkit-tap-highlight-color:transparent;
+  -webkit-touch-callout:none;
+}
 :root {
-  --bg:#0c1220; --panel:#111a2e; --border:#1e3a52;
-  --teal:#00d4aa; --green:#00ff88; --dim:#5a9ab8;
+  --bg:#070B14; --panel:#0A0F1C; --border:rgba(255,255,255,0.08);
+  --teal:#2EE59D; --green:#3CF5AE; --dim:#8B97AD; --orange:#FFAA33;
+  --gold:#FFD23F; --glass:rgba(16,23,38,0.62);
+  --num:'Saira Condensed', 'Segoe UI', sans-serif;
 }
+html, body { height:100%; overscroll-behavior:none; }
 body {
-  background:var(--bg); color:#c8e8f4;
-  font-family:'Segoe UI',Arial,sans-serif;
-  height:100vh; overflow:hidden; user-select:none;
+  background:#05070c; color:#DDE6F2;
+  font-family:Inter, 'Segoe UI', Arial, sans-serif;
+  overflow:hidden; user-select:none; -webkit-user-select:none;
+  height:100dvh;
+  display:flex; align-items:center; justify-content:center;
 }
-#root { height:100vh; }
+#root { height:100%; display:flex; align-items:center; justify-content:center; width:100%; }
+
+/* Mobile touch feel: no 300ms tap delay / double-tap-zoom on controls, and no
+   rubber-band bounce leaking out of the scrollable app column. */
+button, input, .settings-item, .tab-bar button, .quick button {
+  touch-action:manipulation;
+}
+.app { overscroll-behavior-y:contain; }
+
+/* ── Phone frame ──────────────────────────────────────────────────────────
+   On a phone this fills the screen edge to edge (width caps out at 100vw
+   well under 480px anyway) with the single-column, tabbed mobile layout. In
+   the 481-1023px range (a phone in landscape, a small tablet, a narrow
+   window) it's the same single-column layout, just framed as a centered
+   "phone" on a dark backdrop. At ≥1024px (an actual desktop/laptop window)
+   it switches to a proper wide 2-column app shell — see the min-width:1024px
+   block below — rather than just a bigger phone. */
+.phone-frame {
+  position:relative;
+  width:100vw;
+  height:100dvh;
+  overflow:hidden;
+  background:var(--bg);
+  container-type:inline-size;
+  container-name:phone;
+}
+
 .app {
-  height:100%; display:flex; flex-direction:column;
+  height:100%; width:100%;
+  display:flex; flex-direction:column;
+  overflow-y:auto; overflow-x:hidden;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none; -ms-overflow-style:none;
 }
-header {
-  display:flex; justify-content:space-between; align-items:center;
-  padding:8px 22px; background:var(--panel);
-  border-bottom:1px solid var(--border); flex-shrink:0;
+
+.app::-webkit-scrollbar { display:none; }
+
+/* Mobile-default state for the desktop 3-column layout (built at the bottom
+   of this file, under the ≥1024px media query): .layout is transparent to
+   layout so the game and the bet slip flow as plain children of .app's own
+   column, and the info sidebar gives way to the tabs under the slip. */
+.layout { display:contents; }
+.side-left { display:none; }
+.side-right {
+  flex-shrink:0; padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);
+  container:slip / inline-size;
 }
-.logo { font-size:20px; font-weight:900; letter-spacing:4px; color:var(--teal); text-shadow:0 0 18px rgba(0,212,170,.55); display:flex; align-items:center; gap:10px; }
+
+/* ── Header ───────────────────────────────────────────────────────────── */
+/* Scoped to the game's own top bar — a bare `header` selector also styled
+   (and made sticky) every other <header> in the app. */
+.app > header {
+  display:flex; align-items:center; gap:clamp(4px, 1.4cqw, 7px);
+  flex-wrap:nowrap; flex-shrink:0;
+  padding:clamp(1.5px,0.5cqw,2.5px) clamp(8px,2.4cqw,13px);
+  padding-top:calc(env(safe-area-inset-top) + clamp(1.5px,0.5cqw,2.5px));
+  background:linear-gradient(180deg, #0B1222, #080D19);
+  border-bottom:1px solid var(--border);
+  position:sticky; top:0; z-index:20;
+}
+.logo {
+  font-size:clamp(10px, 3.2cqw, 13px); font-weight:900; letter-spacing:1.5px;
+  color:var(--teal); text-shadow:0 0 18px rgba(0,212,170,.55);
+  display:flex; align-items:center; gap:5px;
+  white-space:nowrap; flex-shrink:0;
+}
 .logo .spark { display:inline-block; animation:sparkPulse 2.4s ease-in-out infinite; }
 @keyframes sparkPulse { 0%,100%{ transform:scale(1); filter:drop-shadow(0 0 4px rgba(0,212,170,.6)); } 50%{ transform:scale(1.18); filter:drop-shadow(0 0 12px rgba(0,255,200,.9)); } }
-.round-badge {
-  font-size:10px; font-weight:700; color:var(--dim); letter-spacing:2px;
-  background:rgba(0,212,170,0.08); border:1px solid rgba(0,212,170,0.22);
-  padding:4px 10px; border-radius:20px; white-space:nowrap;
-}
-.round-badge b { color:#00cc99; }
-.rng-pill {
-  display:flex; align-items:center; gap:6px;
-  font-size:10px; font-weight:700; letter-spacing:1.5px;
-  padding:4px 10px; border-radius:20px; white-space:nowrap;
-  border:1px solid rgba(90,154,184,0.25); color:var(--dim);
-  background:rgba(90,154,184,0.06);
-}
-.rng-pill .dot { width:7px; height:7px; border-radius:50%; background:currentColor; flex-shrink:0; }
-.rng-pill.live { color:#00ff88; border-color:rgba(0,255,136,0.3); background:rgba(0,255,136,0.06); }
-.rng-pill.live .dot { box-shadow:0 0 8px #00ff88; animation:rngPulse 1.6s ease-in-out infinite; }
-.rng-pill.connecting { color:#ffdd00; border-color:rgba(255,220,0,0.3); background:rgba(255,220,0,0.05); }
-.rng-pill.connecting .dot { animation:rngPulse 0.9s ease-in-out infinite; }
-.rng-pill.offline { color:#ff5555; border-color:rgba(255,85,85,0.28); background:rgba(255,85,85,0.05); }
-@keyframes rngPulse { 0%,100%{ opacity:1; } 50%{ opacity:0.35; } }
 
-#fairness {
-  font-size:11px; color:#5a9ab8; margin-top:2px; margin-bottom:4px;
-  letter-spacing:.3px; opacity:.85;
+
+.balance-wrap {
+  display:flex; align-items:center; gap:5px;
+  background:rgba(46,229,157,0.07); border:1px solid rgba(46,229,157,0.28);
+  padding:1px 10px; border-radius:16px;
+  margin-left:auto; flex-shrink:0;
 }
-#fairness b { color:#00cc99; }
-.balance-wrap { display:flex; align-items:center; gap:6px; background:rgba(0,255,136,0.06); border:1px solid rgba(0,255,136,0.2); padding:5px 12px; border-radius:20px; }
 .balance-wrap svg { flex-shrink:0; }
 .balance {
-  font-size:16px; font-weight:700; color:var(--green); letter-spacing:.5px;
+  font-family:var(--num); font-size:clamp(10px, 2.9cqw, 12px); font-weight:700; color:var(--teal); letter-spacing:.3px;
   white-space:nowrap; flex-shrink:0; transition:transform .18s ease;
 }
 .balance.bump { animation:balBump .35s ease; }
 @keyframes balBump { 0%{transform:scale(1)} 40%{transform:scale(1.12)} 100%{transform:scale(1)} }
-.game-wrap { flex:1; position:relative; overflow:hidden; min-height:0; }
-#gameCanvas { position:absolute; inset:0; width:100%; height:100%; }
+
+.icon-btn, .info-btn {
+  width:clamp(18px, 5.2cqw, 22px); height:clamp(18px, 5.2cqw, 22px);
+  border-radius:50%; border:1px solid var(--dim);
+  background:transparent; color:var(--dim); font-size:clamp(9px, 2.8cqw, 11px); font-weight:800;
+  cursor:pointer; display:flex; align-items:center; justify-content:center;
+  line-height:1; flex-shrink:0; transition:all .15s;
+}
+.icon-btn:hover, .info-btn:hover { border-color:var(--teal); color:var(--teal); background:rgba(46,229,157,0.08); }
+.icon-btn:active, .info-btn:active { transform:scale(.92); }
+
+/* ── Game canvas + HUD ────────────────────────────────────────────────── */
+/* Portrait phones: a 4:5 box, capped at 58% of the screen height so the
+   stakes and the bet button start right under it on short phones too. */
+.game-wrap {
+  position:relative; width:100%; height:min(125vw, 58dvh); flex-shrink:0;
+  overflow:hidden; background:#09101e;
+}
+#gameCanvas { position:absolute; inset:0; width:100%; height:100%; display:block; }
 
 .hud {
-  position:absolute; top:12px; left:50%;
+  position:absolute; top:clamp(5px,1.6cqw,9px); left:50%;
   transform:translateX(-50%);
   text-align:center; pointer-events:none; z-index:5;
-  animation:hudIn .4s ease;
+  animation:hudIn .4s ease; max-width:90%;
 }
 .dist-panel {
+  position:relative;
   display:flex; align-items:stretch; gap:0;
-  background:rgba(6,12,26,0.88);
-  border:1.5px solid rgba(0,212,170,0.38);
-  border-radius:14px; overflow:hidden;
-  backdrop-filter:blur(12px);
-  box-shadow:0 0 30px rgba(0,212,170,0.18), 0 4px 16px rgba(0,0,0,0.5);
+  background:linear-gradient(180deg, rgba(14,22,38,0.82), rgba(7,11,20,0.88));
+  border:1px solid rgba(255,255,255,0.09);
+  border-radius:clamp(9px,2.4cqw,16px); overflow:hidden;
+  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  box-shadow:0 0 0 1px rgba(46,229,157,0.08), 0 12px 32px rgba(0,0,0,0.5), 0 0 40px rgba(46,229,157,0.12);
 }
-.dist-side { padding:12px 26px; text-align:center; }
+.dist-panel::before {
+  content:''; position:absolute; left:0; right:0; top:0; height:2px;
+  background:linear-gradient(90deg, transparent, var(--teal) 30%, var(--gold) 70%, transparent);
+  opacity:.85;
+}
+.dist-side { padding:clamp(4px,1.2cqw,7px) clamp(7px,2.6cqw,14px); text-align:center; }
 .dv-lbl {
-  font-size:9px; color:#4a8aaa; letter-spacing:3px;
-  text-transform:uppercase; margin-bottom:4px;
+  font-size:clamp(6px, 1.6cqw, 8px); color:var(--dim); letter-spacing:1.6px; font-weight:600;
+  text-transform:uppercase; margin-bottom:1px; white-space:nowrap;
 }
 #distVal {
-  font-size:48px; font-weight:900; color:#00ff88;
-  text-shadow:0 0 32px rgba(0,255,136,.75), 0 0 8px rgba(0,255,136,.4);
-  line-height:1; letter-spacing:-1px;
-  transition:transform .12s ease;
+  font-family:var(--num); font-style:italic;
+  font-size:clamp(18px, 6.6cqw, 30px); font-weight:800; color:var(--teal);
+  text-shadow:0 0 22px rgba(46,229,157,.55);
+  line-height:1; letter-spacing:.01em;
+  transition:transform .12s ease; white-space:nowrap;
 }
 #distVal.tick { animation:distTick .18s ease; }
 @keyframes distTick { 0%{transform:scale(1)} 45%{transform:scale(1.06)} 100%{transform:scale(1)} }
 #predDisplay {
-  font-size:30px; font-weight:800; color:#ffdd00;
-  text-shadow:0 0 18px rgba(255,220,0,.6);
-  line-height:1;
+  font-family:var(--num); font-style:italic;
+  font-size:clamp(12px, 4.2cqw, 19px); font-weight:800; color:var(--gold);
+  text-shadow:0 0 14px rgba(255,210,63,.45);
+  line-height:1; white-space:nowrap;
 }
-.dist-sep { width:1px; background:rgba(0,212,170,0.18); margin:8px 0; flex-shrink:0; }
-#distLabel { font-size:10px; color:#4a7a96; letter-spacing:4px; text-transform:uppercase; margin-top:9px; }
-#statusMsg { font-size:17px; font-weight:800; margin-top:6px; min-height:24px; letter-spacing:1px; }
+.dist-sep { width:1px; background:rgba(255,255,255,0.08); margin:8px 0; flex-shrink:0; }
+#distLabel { font-size:clamp(6px, 1.6cqw, 8px); color:var(--dim); letter-spacing:2.5px; font-weight:600; text-transform:uppercase; margin-top:6px; opacity:.8; }
+#statusMsg { font-size:clamp(9px, 2.6cqw, 13px); font-weight:800; margin-top:2px; min-height:0; letter-spacing:.4px; }
 
 @keyframes hudIn { from{opacity:0; transform:translate(-50%,-10px);} to{opacity:1; transform:translate(-50%,0);} }
 
-.game-wrap.shake { animation:shake .4s ease; }
+.game-wrap.shake { animation:shake .5s ease; }
 @keyframes shake {
-  0%,100%{ transform:translateX(0); }
-  20%{ transform:translateX(-8px) rotate(-.4deg); }
-  40%{ transform:translateX(7px) rotate(.4deg); }
-  60%{ transform:translateX(-5px); }
-  80%{ transform:translateX(4px); }
+  0%,100%{ transform:translate(0,0); }
+  10%{ transform:translate(-11px,4px) rotate(-.9deg); }
+  22%{ transform:translate(9px,-5px) rotate(.8deg); }
+  36%{ transform:translate(-8px,3px) rotate(-.5deg); }
+  50%{ transform:translate(6px,-3px) rotate(.4deg); }
+  64%{ transform:translate(-4px,2px) rotate(-.2deg); }
+  78%{ transform:translate(3px,-1px); }
+  90%{ transform:translate(-1px,1px); }
 }
 
+.fstats {
+  position:absolute; top:clamp(6px,2cqw,12px); right:clamp(6px,2cqw,12px); display:flex; flex-direction:column; gap:4px;
+  pointer-events:none; opacity:0; transform:translateY(-6px);
+  transition:opacity .25s ease, transform .25s ease; align-items:flex-end;
+}
+.fstats.show { opacity:1; transform:translateY(0); }
+.fs {
+  font-size:clamp(8px, 2.4cqw, 10.5px); color:var(--dim); text-align:right;
+  background:var(--glass); border:1px solid var(--border);
+  padding:3px 10px; border-radius:20px; backdrop-filter:blur(8px); white-space:nowrap;
+}
+.fs b { font-family:var(--num); font-size:1.25em; color:var(--teal); font-weight:700; }
+
+/* ── Shared form bits (wallet popup, settings) ──────────────────────────── */
+.flbl { font-size:clamp(7.5px, 2.1cqw, 9.5px); font-weight:600; color:var(--dim); text-transform:uppercase; letter-spacing:1.2px; margin-bottom:3px; }
+
+.input-currency { position:relative; }
+.input-currency .prefix {
+  position:absolute; left:11px; top:50%; transform:translateY(-50%);
+  font-family:var(--num); color:var(--dim); font-size:15px; font-weight:700; pointer-events:none;
+}
+input[type=number] {
+  background:rgba(4,7,14,0.75); border:1px solid var(--border); color:#F4F7FB;
+  font-family:var(--num); font-weight:700; letter-spacing:.02em;
+  padding:7px 10px; border-radius:10px; font-size:18px; width:100%; outline:none; min-width:0;
+  transition:border-color .15s, box-shadow .15s;
+}
+input[type=number]:focus { border-color:var(--teal); box-shadow:0 0 0 3px rgba(46,229,157,0.15); }
+/* Hide the native up/down spinner everywhere (not just dim it) — it clashes
+   with the custom currency-prefixed look and Firefox never dims it anyway. */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+input[type=number] { -moz-appearance:textfield; }
+input[type=number]:disabled { opacity:.5; }
+.input-currency input { padding-left:25px; }
+
+.quick { display:flex; gap:4px; flex-wrap:wrap; margin-top:6px; }
+.quick button {
+  background:rgba(255,255,255,0.04); border:1px solid var(--border); color:#B7C2D4;
+  padding:4px 8px; border-radius:8px; cursor:pointer; font-size:clamp(8.5px, 2.4cqw, 10.5px); font-weight:600;
+  transition:background .12s,color .12s,transform .1s,border-color .12s;
+}
+.quick button:hover { background:rgba(46,229,157,0.08); color:var(--teal); border-color:rgba(46,229,157,0.35); }
+.quick button:active { transform:scale(.93); }
+.quick button.active {
+  background:rgba(46,229,157,0.14); color:var(--teal); border-color:rgba(46,229,157,0.55);
+  box-shadow:0 0 12px rgba(46,229,157,.18);
+}
+.bet-warning { font-size:9.5px; color:#ff5555; margin-top:-2px; line-height:1.35; }
+
+/* ── Mobile info tabs (Session / Payout rules) under the bet slip ─────── */
+.tab-bar {
+  flex-shrink:0; display:flex; gap:3px; margin-top:12px; padding:3px;
+  background:rgba(255,255,255,0.03); border:1px solid var(--border); border-radius:12px;
+}
+.tab-bar button {
+  flex:1; height:34px; border:none; border-radius:9px; background:transparent; color:var(--dim);
+  font-size:12px; font-weight:700; letter-spacing:.04em; cursor:pointer;
+  transition:color .15s, background .15s, box-shadow .15s;
+}
+.tab-bar button.active { color:#F4F7FB; background:rgba(255,255,255,0.10); box-shadow:inset 0 1px 0 rgba(255,255,255,0.08), 0 2px 8px rgba(0,0,0,0.3); }
+.tab-bar button:active { transform:scale(.97); }
+
+.tab-panel { padding-top:8px; display:flex; flex-direction:column; gap:8px; }
+/* Mobile: only the active tab's section contributes to layout. Each section
+   is always mounted (never unmounted) so switching tabs never loses input
+   state — `display:contents` just makes the inactive wrapper disappear
+   visually while `display:none` removes the active one from flow entirely. */
+.tab-section:not(.tab-active) { display:none; }
+.tab-section.tab-active { display:contents; }
+
+/* ── Shared positive/negative P&L colors + history bits (settings) ──────── */
+.stat-pos { color:var(--green); }
+.stat-neg { color:#ff5555; }
+.hist-empty { font-size:12px; color:var(--dim); opacity:.6; }
+.c-loss { background:#1a0505; color:#ff5555; border:1px solid #3a0a0a; }
+.c-win  { background:#021a10; color:#00cc66; border:1px solid #034020; }
+
+/* ── Payout tier rows (side panel + rules modal) ──────────────────────── */
+.tier-table { display:flex; flex-direction:column; gap:6px; }
+.tier-row {
+  display:flex; align-items:center; gap:8px;
+  background:rgba(255,255,255,0.02); border:1px solid var(--border);
+  border-left:3px solid var(--dim); border-radius:8px; padding:8px 10px;
+}
+.tier-row.t-bullseye { border-left-color:#ffcc00; }
+.tier-row.t-great    { border-left-color:#00ff88; }
+.tier-row.t-close    { border-left-color:#00d4aa; }
+.tier-row.t-miss     { border-left-color:#ff3344; opacity:.7; }
+.tier-icon { font-size:16px; flex-shrink:0; width:18px; text-align:center; }
+.tier-mid { display:flex; flex-direction:column; flex:1; min-width:0; }
+.tier-label { font-size:11.5px; font-weight:700; color:#dcefff; }
+.tier-range { font-size:9.5px; color:var(--dim); }
+.tier-end { display:flex; flex-direction:column; align-items:flex-end; flex-shrink:0; }
+.tier-mult { font-family:var(--num); font-size:15px; font-weight:800; color:#fff; line-height:1.05; }
+.tier-cash { font-family:var(--num); font-size:12px; color:var(--teal); font-weight:700; }
+.tier-row.t-miss .tier-cash { color:#ff6666; }
+
+/* ── Accuracy bar ──────────────────────────────────────────────────────── */
+.accuracy-bar { display:flex; flex-direction:column; gap:4px; margin:2px 0 12px; }
+.accuracy-track {
+  position:relative; display:flex; height:30px; border-radius:8px; overflow:hidden;
+  border:1px solid var(--border);
+}
+.accuracy-zone { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; }
+.accuracy-zone.az-bullseye { background:rgba(255,204,0,.16); color:#ffcc00; }
+.accuracy-zone.az-great    { background:rgba(0,255,136,.14); color:#00ff88; }
+.accuracy-zone.az-close    { background:rgba(0,212,170,.12); color:#00d4aa; }
+.accuracy-zone.az-miss     { background:rgba(255,51,68,.12); color:#ff5566; }
+.az-icon { font-size:13px; line-height:1; }
+.az-mult { font-size:9px; font-weight:800; opacity:.9; }
+.accuracy-marker {
+  position:absolute; top:-4px; bottom:-4px; width:2px; background:#fff;
+  box-shadow:0 0 8px #fff, 0 0 3px #fff; transform:translateX(-50%);
+}
+.accuracy-marker::after {
+  content:''; position:absolute; top:-5px; left:50%; transform:translateX(-50%);
+  border-left:5px solid transparent; border-right:5px solid transparent; border-top:5px solid #fff;
+}
+.accuracy-scale { display:flex; justify-content:space-between; font-size:8.5px; color:var(--dim); opacity:.75; padding:0 1px; }
+.accuracy-bar.compact .accuracy-track { height:20px; }
+.accuracy-bar.compact .az-mult { display:none; }
+.accuracy-bar.compact .az-icon { font-size:11px; }
+
+.near-miss { font-size:11.5px; color:#ffaa33; margin:-4px 0 6px; line-height:1.4; }
+
+/* ── Bet slip ─────────────────────────────────────────────────────────────
+   One slip for every screen: the right sidebar on desktop, straight under
+   the game on mobile. Each group carries its own accent (--tone) — Bet 1
+   green, Bet 2 cyan, prediction violet, auto amber, payouts gold — so the
+   groups read apart at a glance. */
+.slip { display:flex; flex-direction:column; gap:8px; }
+.slip > * { min-width:0; }
+.slip-label { font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); }
+.slip :disabled { cursor:not-allowed; }
+
+.slip-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.slip-tabs {
+  display:flex; gap:3px; padding:3px; border-radius:12px;
+  background:rgba(255,255,255,0.04); border:1px solid var(--border);
+}
+.slip-tabs button {
+  height:30px; padding:0 15px; border:none; border-radius:9px; cursor:pointer;
+  background:transparent; color:var(--dim); font-size:12px; font-weight:700; letter-spacing:.04em;
+  display:inline-flex; align-items:center; transition:color .15s, background .15s, box-shadow .15s;
+}
+.slip-tabs button:hover:not(:disabled):not(.on) { color:#F4F7FB; }
+.slip-tabs button.on { color:#F4F7FB; background:rgba(255,255,255,0.10); box-shadow:inset 0 1px 0 rgba(255,255,255,0.08), 0 2px 8px rgba(0,0,0,0.3); }
+.slip-tabs button:disabled { opacity:.4; }
+.slip-live {
+  width:6px; height:6px; margin-left:7px; border-radius:50%;
+  background:#FFAA33; box-shadow:0 0 8px #FFAA33; animation:slipLive 1s ease-in-out infinite;
+}
+@keyframes slipLive { 50% { opacity:.25; } }
+.slip-balance { display:flex; flex-direction:column; align-items:flex-end; line-height:1.15; }
+.slip-balance small { font-size:9px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); }
+.slip-balance b { font-family:var(--num); font-size:18px; font-weight:700; color:var(--teal); }
+
+.slip-bet, .slip-pred, .slip-auto, .slip-payouts {
+  --tone:46,229,157;
+  display:flex; flex-direction:column; gap:6px; padding:9px 10px 10px; border-radius:14px;
+  background:linear-gradient(160deg, rgba(var(--tone),0.13), rgba(var(--tone),0.03) 70%);
+  border:1px solid rgba(var(--tone),0.26);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.slip-bet.tone-b { --tone:92,214,255; }
+.slip-pred { --tone:178,110,255; }
+.slip-auto { --tone:255,170,51; }
+.slip-payouts { --tone:255,210,63; }
+.slip-bet > .slip-label, .slip-pred .slip-label, .slip-payouts > .slip-label { color:rgb(var(--tone)); }
+
+.slip-stepper { display:flex; align-items:stretch; gap:5px; height:38px; }
+.slip-stepper > button {
+  width:36px; flex:none; border-radius:10px; cursor:pointer;
+  border:1px solid rgba(var(--tone),0.3); background:rgba(var(--tone),0.10); color:rgb(var(--tone));
+  font-size:19px; font-weight:700; line-height:1; transition:background .12s, transform .1s;
+}
+.slip-stepper > button:hover:not(:disabled) { background:rgba(var(--tone),0.2); }
+.slip-stepper > button:active:not(:disabled) { transform:scale(.92); }
+.slip-stepper > button:disabled { opacity:.4; }
+.slip-amount {
+  flex:1; min-width:0; display:flex; align-items:center; gap:2px; padding:0 10px; border-radius:10px;
+  background:rgba(3,6,12,0.7); border:1px solid rgba(var(--tone),0.28);
+  transition:border-color .15s, box-shadow .15s;
+}
+.slip-amount:focus-within { border-color:rgb(var(--tone)); box-shadow:0 0 0 3px rgba(var(--tone),0.16); }
+.slip-amount span { font-family:var(--num); font-size:15px; font-weight:700; color:var(--dim); }
+.slip-amount input, .slip-pred-value input {
+  background:transparent; border:none; border-radius:0; padding:0; font-size:20px; text-align:center;
+}
+.slip-amount input:focus, .slip-pred-value input:focus { box-shadow:none; }
+
+.slip-chips { display:flex; gap:4px; }
+.slip-chips button {
+  flex:1 1 0; min-width:0; height:26px; padding:0 2px; border-radius:7px; cursor:pointer;
+  border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.04); color:#B7C2D4;
+  font-family:var(--num); font-size:12.5px; font-weight:700; letter-spacing:.02em; white-space:nowrap;
+  transition:background .12s, color .12s, border-color .12s, transform .1s;
+}
+.slip-chips button:hover:not(:disabled) { color:rgb(var(--tone)); border-color:rgba(var(--tone),0.4); background:rgba(var(--tone),0.08); }
+.slip-chips button:active:not(:disabled) { transform:scale(.94); }
+.slip-chips button.on { color:#07101A; background:rgb(var(--tone)); border-color:transparent; box-shadow:0 0 12px rgba(var(--tone),0.35); }
+.slip-chips button:disabled { opacity:.4; }
+
+.slip-pred-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.slip-pred-value {
+  display:flex; align-items:baseline; gap:2px; padding:3px 10px; border-radius:9px;
+  background:rgba(3,6,12,0.7); border:1px solid rgba(var(--tone),0.3);
+}
+.slip-pred-value:focus-within { border-color:rgb(var(--tone)); box-shadow:0 0 0 3px rgba(var(--tone),0.16); }
+.slip-pred-value input { width:58px; color:#E8D9FF; text-align:right; }
+.slip-pred-value span { font-family:var(--num); font-size:14px; font-weight:700; color:var(--dim); }
+.slip-range { -webkit-appearance:none; appearance:none; width:100%; height:22px; margin:0; background:transparent; cursor:pointer; }
+.slip-range::-webkit-slider-runnable-track {
+  height:6px; border-radius:3px;
+  background:linear-gradient(90deg, rgb(var(--tone)) 0 var(--fill), rgba(255,255,255,0.1) var(--fill) 100%);
+}
+.slip-range::-moz-range-track { height:6px; border-radius:3px; background:rgba(255,255,255,0.1); }
+.slip-range::-moz-range-progress { height:6px; border-radius:3px; background:rgb(var(--tone)); }
+.slip-range::-webkit-slider-thumb {
+  -webkit-appearance:none; appearance:none; width:20px; height:20px; margin-top:-7px; border-radius:50%;
+  background:#fff; border:4px solid rgb(var(--tone)); box-shadow:0 0 0 4px rgba(var(--tone),0.2), 0 2px 8px rgba(0,0,0,0.5);
+}
+.slip-range::-moz-range-thumb {
+  width:12px; height:12px; border-radius:50%;
+  background:#fff; border:4px solid rgb(var(--tone)); box-shadow:0 0 0 4px rgba(var(--tone),0.2), 0 2px 8px rgba(0,0,0,0.5);
+}
+.slip-range:focus-visible { outline:none; }
+.slip-range:focus-visible::-webkit-slider-thumb { box-shadow:0 0 0 6px rgba(var(--tone),0.4); }
+.slip-range:disabled { opacity:.45; }
+
+.slip-auto-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px; }
+.slip-auto-grid label { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.slip-auto-grid span { font-size:9.5px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:rgb(var(--tone)); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.slip-auto-grid input { height:34px; padding:0 6px; font-size:16px; text-align:center; border-color:rgba(var(--tone),0.28); }
+.slip-auto-grid input:focus { border-color:rgb(var(--tone)); box-shadow:0 0 0 3px rgba(var(--tone),0.16); }
+.slip-auto-grid input::placeholder { color:#5A6478; }
+.slip-auto-status { display:flex; flex-direction:column; gap:6px; padding:8px 10px; border-radius:10px; background:rgba(3,6,12,0.55); border:1px solid rgba(var(--tone),0.2); }
+.slip-auto-line { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:12px; color:#C5CFDF; }
+.slip-auto-line > b { font-family:var(--num); font-size:16px; }
+.slip-auto-line span b { color:#F4F7FB; }
+.slip-auto-bar { height:5px; border-radius:3px; background:rgba(255,255,255,0.08); overflow:hidden; }
+.slip-auto-bar i { display:block; height:100%; border-radius:3px; background:linear-gradient(90deg, #FFAA33, #FFD23F); box-shadow:0 0 10px rgba(255,170,51,0.6); transition:width .4s ease; }
+.slip .pos { color:var(--green); }
+.slip .neg { color:#FF6B7F; }
+
+.slip-payout-row { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:5px; }
+.slip-payout {
+  display:flex; flex-direction:column; align-items:center; gap:1px; padding:6px 4px 5px; border-radius:10px; min-width:0;
+  background:rgba(3,6,12,0.5); border:1px solid rgba(255,255,255,0.06); text-align:center;
+}
+.slip-payout-top { display:flex; align-items:center; gap:4px; font-family:var(--num); font-size:13px; font-weight:800; color:#F4F7FB; }
+.slip-payout-top i { font-style:normal; font-size:12px; }
+.slip-payout b { font-family:var(--num); font-size:16px; font-weight:700; line-height:1.1; max-width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.slip-payout small { font-size:9px; color:var(--dim); white-space:nowrap; }
+.slip-payout.t-bullseye { border-color:rgba(255,210,63,0.35); background:linear-gradient(180deg, rgba(255,210,63,0.14), rgba(3,6,12,0.5)); }
+.slip-payout.t-bullseye b { color:#FFD23F; text-shadow:0 0 12px rgba(255,210,63,0.4); }
+.slip-payout.t-great b { color:#3CF5AE; }
+.slip-payout.t-close b { color:#5CD6FF; }
+
+.slip-cta {
+  --c1:#2EE59D; --c2:#14B97A; --glow:46,229,157; --ink:#03140C;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+  width:100%; min-height:56px; padding:8px 14px; border:none; border-radius:16px; cursor:pointer;
+  background:linear-gradient(135deg, var(--c1), var(--c2)); color:var(--ink);
+  font-family:var(--num); font-size:21px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; line-height:1;
+  box-shadow:0 0 0 1px rgba(var(--glow),0.5), 0 10px 28px rgba(var(--glow),0.3);
+  transition:transform .15s, box-shadow .15s, opacity .15s, filter .15s;
+  position:relative; isolation:isolate;
+}
+/* The breathing glow is a pre-shadowed layer whose opacity animates — the
+   compositor handles that alone, where animating box-shadow itself would
+   repaint the button every frame (costly on a phone). */
+.slip-cta::after {
+  content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none; z-index:-1;
+  box-shadow:0 0 0 5px rgba(var(--glow),0.14), 0 10px 34px rgba(var(--glow),0.45);
+  opacity:0;
+}
+.slip-cta:not(:disabled)::after { animation:ctaGlow 2.6s ease-in-out infinite; }
+@keyframes ctaGlow { 50% { opacity:1; } }
+.slip-cta small { font-family:Inter, 'Segoe UI', sans-serif; font-size:11px; font-weight:600; letter-spacing:.02em; text-transform:none; opacity:.75; }
+.slip-cta:hover:not(:disabled) { transform:translateY(-2px); }
+.slip-cta:active:not(:disabled) { transform:translateY(0) scale(.98); }
+.slip-cta:disabled { opacity:.4; filter:saturate(.4); }
+.slip-cta.is-auto { --c1:#FFC14D; --c2:#FF8A1F; --glow:255,170,51; --ink:#1E0E00; }
+.slip-cta.is-stop { --c1:#FF6B7F; --c2:#E02D4C; --glow:255,92,122; --ink:#fff; }
+.slip-cta:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+.slip-warn { font-size:11px; line-height:1.4; color:#FF8A9A; padding:0 2px; }
+.slip-hint { font-size:11px; line-height:1.4; color:var(--dim); text-align:center; }
+
+/* ── Info panels (session, recent rounds, payout rules) ─────────────────── */
+.info-card {
+  display:flex; flex-direction:column; gap:9px; padding:11px 12px 12px; border-radius:14px;
+  background:linear-gradient(180deg, rgba(20,28,46,0.72), rgba(12,17,30,0.72));
+  border:1px solid var(--border); box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.info-card .accuracy-bar { margin:0; }
+.info-title { font-size:10px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); }
+.info-title-row { display:flex; align-items:center; justify-content:space-between; }
+.info-empty { font-size:12px; color:#5A6478; }
+
+.session-streak { display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+.session-badge {
+  font-family:var(--num); font-size:14px; font-weight:700; letter-spacing:.06em;
+  padding:4px 11px; border-radius:20px; color:var(--dim);
+  background:rgba(255,255,255,0.04); border:1px solid var(--border);
+}
+.session-badge.is-win  { color:var(--green); background:rgba(46,229,157,0.1); border-color:rgba(46,229,157,0.32); }
+.session-badge.is-loss { color:#FF6B7F; background:rgba(255,92,122,0.1); border-color:rgba(255,92,122,0.32); }
+.session-best { font-size:11px; color:var(--dim); white-space:nowrap; }
+.session-stats { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px; }
+.session-stats div { display:flex; flex-direction:column; gap:1px; padding:7px 8px; border-radius:10px; min-width:0; background:rgba(3,6,12,0.45); border:1px solid rgba(255,255,255,0.05); }
+.session-stats span { font-size:9px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); }
+.session-stats b { font-family:var(--num); font-size:17px; font-weight:700; color:#F4F7FB; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.session-stats b.pos { color:var(--green); }
+.session-stats b.neg { color:#FF6B7F; }
+
+.recent-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:5px; }
+.recent-chip { display:flex; flex-direction:column; padding:6px 9px; border-radius:10px; min-width:0; border:1px solid transparent; }
+.recent-chip b { font-family:var(--num); font-size:17px; font-weight:700; line-height:1.1; }
+.recent-chip span { font-size:10px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.recent-chip.is-miss  { background:rgba(255,92,122,0.08); border-color:rgba(255,92,122,0.22); }
+.recent-chip.is-miss b { color:#FF6B7F; }
+.recent-chip.is-win   { background:rgba(92,214,255,0.08); border-color:rgba(92,214,255,0.22); }
+.recent-chip.is-win b { color:#5CD6FF; }
+.recent-chip.is-great { background:rgba(46,229,157,0.09); border-color:rgba(46,229,157,0.26); }
+.recent-chip.is-great b { color:#3CF5AE; }
+.recent-chip.is-top   { background:rgba(255,210,63,0.1); border-color:rgba(255,210,63,0.34); box-shadow:0 0 12px rgba(255,210,63,0.15); }
+.recent-chip.is-top b { color:#FFD23F; }
+.recent-chip.is-empty { background:rgba(255,255,255,0.02); border:1px dashed rgba(255,255,255,0.08); }
+.recent-chip.is-empty b { color:#3A4458; }
+
+/* ── Live payout zone in the HUD while the bike is in the air ───────────── */
+.live-zone {
+  display:inline-flex; align-items:center; gap:6px; margin-top:6px; padding:4px 12px; border-radius:20px;
+  font-size:clamp(9px, 2.6cqw, 12px); font-weight:800; letter-spacing:.08em; text-transform:uppercase; white-space:nowrap;
+  color:var(--dim); background:rgba(7,11,20,0.8); border:1px solid rgba(255,255,255,0.1);
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+}
+.live-zone b { font-family:var(--num); font-size:1.3em; }
+.live-zone.z-close { color:#5CD6FF; border-color:rgba(92,214,255,0.45); }
+.live-zone.z-great { color:#3CF5AE; border-color:rgba(46,229,157,0.55); box-shadow:0 0 18px rgba(46,229,157,0.25); }
+.live-zone.z-top { color:#FFD23F; border-color:rgba(255,210,63,0.7); box-shadow:0 0 24px rgba(255,210,63,0.4); animation:zoneHot .5s ease-in-out infinite alternate; }
+.live-zone.z-over { color:#FF6B7F; border-color:rgba(255,92,122,0.4); }
+@keyframes zoneHot { to { transform:scale(1.07); } }
+
+/* ── Auto-bet strip in the result overlay ───────────────────────────────── */
+.auto-hint {
+  display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px;
+  padding:7px 7px 7px 12px; border-radius:12px; text-align:left;
+  font-size:12px; font-weight:600; color:#FFC876;
+  background:rgba(255,170,51,0.08); border:1px solid rgba(255,170,51,0.3);
+}
+.auto-hint button {
+  flex:none; height:32px; padding:0 13px; border-radius:9px; cursor:pointer;
+  border:1px solid rgba(255,92,122,0.45); background:rgba(255,92,122,0.12); color:#FF8A9A;
+  font-size:12px; font-weight:700; transition:background .12s;
+}
+.auto-hint button:hover { background:rgba(255,92,122,0.22); }
+
+/* ── Wallet card (tab) ────────────────────────────────────────────────── */
+.wallet-actions { display:flex; gap:6px; margin-top:8px; margin-bottom:16px; }
+.wallet-btn {
+  flex:1; padding:10px; border-radius:7px; font-weight:800; font-size:12.5px; cursor:pointer;
+  transition:transform .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.wallet-btn:active { transform:scale(.97); }
+.wallet-deposit { background:#0d2840; color:#00d4aa; border:1px solid rgba(0,212,170,.35); }
+.wallet-deposit:hover { background:#0e3048; box-shadow:0 0 0 1px rgba(0,212,170,.3) inset; }
+.wallet-withdraw { background:rgba(255,170,0,.1); color:#ffaa33; border:1px solid rgba(255,170,0,.35); }
+.wallet-withdraw:hover:not(:disabled) { background:rgba(255,170,0,.18); }
+.wallet-withdraw:disabled { opacity:.4; cursor:not-allowed; }
+.wallet-btn-icon { margin-right:4px; }
+
+/* ── Wallet popup ("pit stop" deposit/withdraw) ──────────────────────────
+   Absolute (not fixed) so it's confined to the phone-frame, not the whole
+   desktop viewport when the frame is centered on a wide screen. */
+.wallet-modal-overlay { z-index:60; }
+.wallet-modal {
+  background:var(--panel); border:2px solid var(--border); border-radius:16px;
+  padding:20px 20px; width:min(92%, 340px);
+  animation:popIn .28s cubic-bezier(.2,1.4,.4,1);
+  transition:border-color .2s ease, box-shadow .2s ease;
+}
+.wallet-modal.wm-deposit  { border-color:rgba(0,212,170,.5); box-shadow:0 0 40px rgba(0,212,170,.18); }
+.wallet-modal.wm-withdraw { border-color:rgba(255,170,51,.5); box-shadow:0 0 40px rgba(255,170,51,.18); }
+
+.wm-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+.wm-head h3 { font-size:16px; letter-spacing:.5px; color:#dcefff; display:flex; align-items:center; gap:8px; }
+.wm-flag { display:inline-block; animation:sparkPulse 2.2s ease-in-out infinite; }
+.wm-close {
+  width:26px; height:26px; border-radius:50%; border:1px solid var(--border);
+  background:transparent; color:var(--dim); font-size:16px; line-height:1; cursor:pointer;
+  display:flex; align-items:center; justify-content:center; transition:all .15s; flex-shrink:0;
+}
+.wm-close:hover { border-color:#ff5555; color:#ff5555; background:rgba(255,85,85,.08); }
+
+.wm-tabs { display:flex; gap:6px; margin-bottom:16px; background:rgba(255,255,255,.03); padding:4px; border-radius:10px; border:1px solid var(--border); }
+.wm-tabs button {
+  flex:1; padding:8px 4px; border-radius:7px; border:none; background:transparent; color:var(--dim);
+  font-weight:800; font-size:12px; cursor:pointer; transition:all .15s;
+}
+.wm-tabs button:hover:not(:disabled) { color:#c8e8f4; }
+.wm-tabs button.active { background:var(--bg); color:var(--teal); box-shadow:0 0 0 1px rgba(0,212,170,.3) inset; }
+.wm-withdraw .wm-tabs button.active { color:#ffaa33; box-shadow:0 0 0 1px rgba(255,170,51,.3) inset; }
+.wm-tabs button:disabled { opacity:.35; cursor:not-allowed; }
+
+.wm-balance {
+  display:flex; justify-content:space-between; align-items:baseline;
+  font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:1px;
+  background:rgba(255,255,255,.02); border:1px solid var(--border); border-radius:8px;
+  padding:9px 12px; margin-bottom:12px;
+}
+.wm-balance b { font-size:16px; color:#00ff88; text-transform:none; letter-spacing:0; }
+
+.wm-input input { font-size:19px; font-weight:800; padding:11px 11px 11px 28px; }
+.wm-input .prefix { font-size:17px; }
+.wm-quick { margin-top:10px; margin-bottom:4px; }
+
+.wm-confirm {
+  width:100%; margin-top:14px; padding:13px; border-radius:9px; border:none;
+  font-size:13.5px; font-weight:800; letter-spacing:.5px; text-transform:uppercase;
+  cursor:pointer; transition:all .15s;
+}
+.wm-confirm-deposit  { background:linear-gradient(135deg,#005533,#00cc88); color:#001a0e; box-shadow:0 0 22px rgba(0,190,120,.35); }
+.wm-confirm-withdraw { background:linear-gradient(135deg,#7a3f00,#ffaa33); color:#241000; box-shadow:0 0 22px rgba(255,170,51,.35); }
+.wm-confirm:hover:not(:disabled) { transform:translateY(-2px); filter:brightness(1.08); }
+.wm-confirm:active:not(:disabled) { transform:translateY(0) scale(.97); }
+.wm-confirm:disabled { opacity:.35; cursor:not-allowed; }
+
+.wm-success { text-align:center; padding:8px 0 2px; animation:popIn .3s cubic-bezier(.2,1.4,.4,1); }
+.wm-success-icon { font-size:40px; filter:drop-shadow(0 0 16px rgba(0,255,136,.5)); margin-bottom:6px; }
+.wm-success-title { font-size:16px; font-weight:900; color:#dcefff; letter-spacing:.5px; margin-bottom:6px; }
+.wm-success-amt { font-size:27px; font-weight:900; margin-bottom:10px; }
+.wm-success-amt-deposit  { color:#00ff88; text-shadow:0 0 22px rgba(0,255,136,.5); }
+.wm-success-amt-withdraw { color:#ffaa33; text-shadow:0 0 22px rgba(255,170,51,.5); }
+.wm-success-bal { font-size:12px; color:var(--dim); margin-bottom:16px; }
+.wm-success-bal b { color:#c8e8f4; }
+.wm-done {
+  width:100%; padding:11px; border-radius:8px; cursor:pointer;
+  background:#0d1e30; color:var(--teal); font-weight:700; font-size:13px;
+  border:1px solid var(--border); transition:border-color .15s;
+}
+.wm-done:hover { border-color:var(--teal); }
+
+/* ── Result / countdown overlays — cover the whole phone-frame (header,
+   canvas, controls, tabs), not just the canvas box ─────────────────────── */
 #resultOverlay {
   position:absolute; inset:0; display:flex;
-  align-items:center; justify-content:center;
-  background:rgba(0,0,0,.65); backdrop-filter:blur(5px); z-index:10;
+  align-items:center; justify-content:center; padding:16px;
+  background:rgba(0,0,0,.68); backdrop-filter:blur(5px); z-index:40;
   animation:fadeIn .25s ease;
 }
 @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+/* One card per round: the tier and accuracy once (both bets ride the same
+   pick), then each bet's payout and the round's net. */
 #resultBox {
-  background:var(--panel); border:2px solid var(--border);
-  border-radius:16px; padding:30px 44px; text-align:center; min-width:320px;
+  --res:#8B97AD; --res-glow:transparent;
+  position:relative; width:100%; max-width:360px; max-height:92%; overflow-y:auto;
+  padding:20px 18px 16px; border-radius:22px; text-align:center;
+  background:linear-gradient(180deg, #111A2C, #0A0F1C 60%);
+  border:1px solid var(--border); box-shadow:0 24px 60px rgba(0,0,0,0.55);
+  scrollbar-width:none; -ms-overflow-style:none;
   animation:popIn .32s cubic-bezier(.2,1.4,.4,1);
 }
+#resultBox::-webkit-scrollbar { display:none; }
+#resultBox::before {
+  content:''; position:absolute; left:18%; right:18%; top:0; height:2px; border-radius:2px;
+  background:var(--res); box-shadow:0 0 18px var(--res-glow);
+}
+#resultBox.is-win  { --res:#3CF5AE; --res-glow:rgba(46,229,157,0.5); border-color:rgba(46,229,157,0.35); }
+#resultBox.is-top  { --res:#FFD23F; --res-glow:rgba(255,210,63,0.55); border-color:rgba(255,210,63,0.45); box-shadow:0 0 70px rgba(255,210,63,0.2), 0 24px 60px rgba(0,0,0,0.55); }
+#resultBox.is-loss { --res:#FF5C7A; --res-glow:rgba(255,92,122,0.35); border-color:rgba(255,92,122,0.28); }
 @keyframes popIn { from{opacity:0; transform:scale(.85) translateY(10px);} to{opacity:1; transform:scale(1) translateY(0);} }
-#resultTitle { font-size:38px; font-weight:900; margin-bottom:8px; }
-#resultDetails { font-size:13px; color:var(--dim); line-height:2; }
-#resultPayout { font-size:26px; font-weight:800; margin:12px 0; }
+.result-kicker { font-size:10px; font-weight:700; letter-spacing:.18em; text-transform:uppercase; color:var(--dim); }
+.result-title {
+  margin:4px 0 14px; font-family:var(--num); font-style:italic; font-weight:800; letter-spacing:.02em; line-height:1;
+  font-size:clamp(28px, 9cqw, 38px); color:var(--res); text-shadow:0 0 26px var(--res-glow);
+}
+.result-facts { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px; margin-bottom:12px; }
+.result-facts div { display:flex; flex-direction:column; gap:2px; padding:8px 4px 7px; border-radius:12px; background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.06); }
+.result-facts span { font-size:9px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--dim); }
+.result-facts b { font-family:var(--num); font-size:22px; font-weight:700; color:#F4F7FB; line-height:1.05; }
+#resultBox .accuracy-bar { margin:0 0 8px; }
+.result-bets { display:flex; flex-direction:column; gap:4px; margin:8px 0 10px; text-align:left; }
+.result-bet { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:7px 11px; border-radius:10px; background:rgba(255,255,255,0.03); font-size:12px; color:#C5CFDF; }
+.result-bet b { font-family:var(--num); font-size:17px; font-weight:700; }
+.result-net { margin-top:2px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.08); font-weight:700; color:#F4F7FB; }
+.result-net b { font-size:21px; }
+.result-bets .pos { color:var(--green); }
+.result-bets .neg { color:#FF6B7F; }
+#fairness { font-size:10.5px; color:#6F8DA8; letter-spacing:.3px; }
+#fairness b { color:#3CF5AE; }
 #nextBtn {
-  margin-top:10px; padding:10px 32px; border-radius:8px; border:none;
-  background:#00cc88; color:#001a0e; font-weight:800; font-size:15px; cursor:pointer;
+  margin-top:12px; width:100%; height:50px; border:none; border-radius:14px; cursor:pointer;
+  background:linear-gradient(135deg, #2EE59D, #14B97A); color:#03140C;
+  font-family:var(--num); font-size:19px; font-weight:800; letter-spacing:.12em; text-transform:uppercase;
+  box-shadow:0 0 0 1px rgba(46,229,157,0.5), 0 10px 26px rgba(46,229,157,0.3);
   transition:transform .15s ease, box-shadow .15s ease;
 }
-#nextBtn:hover { transform:translateY(-2px); box-shadow:0 4px 18px rgba(0,220,150,.4); }
+#nextBtn:hover { transform:translateY(-2px); box-shadow:0 0 0 1px rgba(46,229,157,0.7), 0 14px 32px rgba(46,229,157,0.45); }
 #nextBtn:active { transform:translateY(0) scale(.97); }
 
 #countdownOverlay {
   position:absolute; inset:0; display:flex;
   align-items:center; justify-content:center;
-  background:rgba(0,0,0,.55); backdrop-filter:blur(4px); z-index:12;
+  background:rgba(0,0,0,.55); backdrop-filter:blur(4px); z-index:41;
   animation:fadeIn .2s ease;
 }
-#countdownLabel { font-size:13px; letter-spacing:4px; color:#4a9ab5; text-transform:uppercase; text-align:center; margin-bottom:8px; }
+#countdownLabel { font-size:clamp(10px,3.4cqw,13px); letter-spacing:3px; color:#4a9ab5; text-transform:uppercase; text-align:center; margin-bottom:8px; }
 #countdownNum {
-  font-size:130px; font-weight:900; color:#00ff88;
+  font-size:clamp(64px, 24cqw, 110px); font-weight:900; color:#00ff88;
   text-shadow:0 0 50px rgba(0,255,136,.8), 0 0 14px rgba(0,255,136,.5);
   line-height:1; text-align:center;
 }
 #countdownNum.beat { animation:countBeat .5s cubic-bezier(.2,1.6,.4,1); }
 @keyframes countBeat { 0%{transform:scale(1.6); opacity:0;} 60%{transform:scale(.92); opacity:1;} 100%{transform:scale(1);} }
 
-.fstats {
-  position:absolute; top:12px; right:14px; display:flex; gap:6px;
-  pointer-events:none; opacity:0; transform:translateY(-6px);
-  transition:opacity .25s ease, transform .25s ease;
+/* ── "How it works" + Settings modals — absolute within the phone-frame ── */
+.modal-overlay {
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.68); backdrop-filter:blur(5px); z-index:50;
+  animation:fadeIn .2s ease; padding:16px;
 }
-.fstats.show { opacity:1; transform:translateY(0); }
-.fs {
-  font-size:11px; color:#4a8aaa; text-align:right;
-  background:rgba(6,14,28,.7); border:1px solid rgba(0,212,170,.2);
-  padding:4px 10px; border-radius:20px; backdrop-filter:blur(6px);
+.modal-box {
+  background:var(--panel); border:2px solid var(--border); border-radius:16px;
+  padding:22px 20px; width:100%; max-width:400px; max-height:85%; overflow-y:auto;
+  scrollbar-width:none; -ms-overflow-style:none;
+  animation:popIn .28s cubic-bezier(.2,1.4,.4,1);
 }
-.fs b { color:#00e6a8; font-weight:700; }
-
-.controls {
-  background:var(--panel); border-top:1px solid var(--border);
-  padding:10px 20px; display:flex; gap:16px; align-items:flex-end;
-  flex-wrap:wrap; flex-shrink:0;
+.modal-box::-webkit-scrollbar { display:none; }
+.modal-box h3 { font-size:17px; color:var(--teal); margin-bottom:14px; letter-spacing:.5px; }
+.modal-box .steps { display:flex; flex-direction:column; gap:10px; margin-bottom:16px; }
+.modal-step { display:flex; gap:10px; align-items:flex-start; font-size:12.5px; color:#c8e8f4; line-height:1.5; }
+.modal-step .num {
+  flex-shrink:0; width:20px; height:20px; border-radius:50%; background:rgba(0,212,170,.15);
+  border:1px solid rgba(0,212,170,.4); color:var(--teal); font-size:11px; font-weight:800;
+  display:flex; align-items:center; justify-content:center; margin-top:1px;
 }
-.flbl { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:2px; margin-bottom:4px; }
-.col { display:flex; flex-direction:column; }
-input[type=number] {
-  background:var(--bg); border:1px solid var(--border); color:#c0e8f0;
-  padding:8px 11px; border-radius:7px; font-size:14px; width:115px; outline:none;
+.modal-box .tier-table { margin-bottom:16px; }
+.modal-subhead { font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:2px; margin-bottom:8px; }
+.modal-example {
+  font-size:12px; color:#c8e8f4; line-height:1.6; margin-bottom:16px;
+  background:rgba(0,212,170,0.06); border:1px solid rgba(0,212,170,0.2);
+  border-radius:10px; padding:10px 12px;
 }
-input[type=number]:focus { border-color:var(--teal); }
-input[type=number]::-webkit-inner-spin-button { opacity:.2; }
-.quick { display:flex; gap:4px; flex-wrap:wrap; margin-top:5px; }
-.quick button {
-  background:#0d1e30; border:1px solid var(--border); color:#4a9ab5;
-  padding:4px 8px; border-radius:5px; cursor:pointer; font-size:11px;
-  transition:background .12s,color .12s,transform .1s;
+.modal-example b { color:#00e6a8; }
+.modal-close {
+  width:100%; padding:11px; border-radius:8px; cursor:pointer;
+  background:#0d1e30; color:var(--teal); font-weight:700; font-size:13px;
+  border:1px solid var(--border); transition:border-color .15s;
 }
-.quick button:hover { background:#0e2840; color:var(--teal); border-color:#00a888; }
-.quick button:active { transform:scale(.93); }
-.pred-hint { font-size:10px; color:#3a7090; margin-top:3px; }
-.pred-hint b { color:#00cc88; }
-#mainBtn {
-  padding:12px 42px; border-radius:9px; font-size:16px; font-weight:800;
-  cursor:pointer; border:none; letter-spacing:1px; text-transform:uppercase;
-  min-width:150px; align-self:flex-end; transition:all .15s;
+.modal-close:hover { border-color:var(--teal); }
+
+/* ── Settings modal ───────────────────────────────────────────────────── */
+.settings-row {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 2px; border-bottom:1px solid var(--border); margin-bottom:14px;
+  font-size:13px; color:#dcefff;
 }
-.btn-bet { background:linear-gradient(135deg,#005533,#00cc88); color:#001a0e; box-shadow:0 0 22px rgba(0,190,120,.4); }
-.btn-bet:hover:not(:disabled) { transform:translateY(-2px); box-shadow:0 0 34px rgba(0,255,140,.6); }
-.btn-bet:active:not(:disabled) { transform:translateY(0) scale(.97); }
-#mainBtn:disabled { opacity:.3; cursor:not-allowed; }
-.history-col { margin-left:auto; display:flex; flex-direction:column; }
-.chips { display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; margin-top:5px; max-width:260px; }
-.chip { padding:3px 8px; border-radius:20px; font-size:11px; font-weight:800; letter-spacing:.4px; }
-.c-loss { background:#1a0505; color:#ff5555; border:1px solid #3a0a0a; }
-.c-win  { background:#021a10; color:#00cc66; border:1px solid #034020; }
-.c-big  { background:#0a0520; color:#aa66ff; border:1px solid #280e55; }
+.switch {
+  width:44px; height:26px; border-radius:20px; border:1px solid var(--border);
+  background:#0a1220; cursor:pointer; position:relative; padding:0; flex-shrink:0;
+  transition:background .15s, border-color .15s;
+}
+.switch .switch-knob {
+  position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%;
+  background:var(--dim); transition:transform .18s ease, background .15s;
+}
+.switch.on { background:rgba(0,255,136,.15); border-color:rgba(0,255,136,.4); }
+.switch.on .switch-knob { transform:translateX(18px); background:var(--green); box-shadow:0 0 8px rgba(0,255,136,.6); }
 
-/* ── Base: prevent logo from ever wrapping ────────────────────────────────── */
-.logo    { white-space:nowrap; flex-shrink:0; }
-.balance { white-space:nowrap; flex-shrink:0; }
-header   { flex-wrap:nowrap; gap:8px; }
+.settings-actions { display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
+.settings-btn {
+  padding:12px; border-radius:8px; cursor:pointer; font-weight:700; font-size:12.5px;
+  background:#0d1e30; color:var(--teal); border:1px solid var(--border); transition:all .15s;
+}
+.settings-btn:hover { border-color:var(--teal); background:#0e2840; }
+.settings-btn:active { transform:scale(.98); }
+.settings-btn-danger { color:#ff8855; }
+.settings-btn-danger:hover { border-color:#ff8855; background:rgba(255,85,0,.08); }
 
-/* ── Tablet (≤1024px) ────────────────────────────────────────────────────── */
-@media (max-width:1024px){
-  .controls { gap:10px; padding:8px 14px; }
-  input[type=number] { width:100px; }
-  .history-col { margin-left:0; }
-  .chips { max-width:200px; }
+/* ── Settings root menu (list → sub-page navigation) ─────────────────────── */
+.settings-list { display:flex; flex-direction:column; gap:6px; margin-bottom:16px; }
+.settings-item {
+  display:flex; align-items:center; gap:10px; width:100%;
+  padding:12px 10px; border-radius:10px; border:1px solid var(--border);
+  background:rgba(255,255,255,.02); color:#dcefff; cursor:pointer;
+  font-size:13px; font-weight:600; text-align:left; transition:all .15s;
+}
+.settings-item:hover { border-color:var(--teal); background:rgba(0,212,170,.06); }
+.settings-item:active { transform:scale(.98); }
+.si-icon { font-size:17px; flex-shrink:0; width:20px; text-align:center; }
+.si-label { flex:1; min-width:0; }
+.si-chev { color:var(--dim); font-size:18px; flex-shrink:0; }
+
+.settings-page-head { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+.settings-page-head h3 { margin-bottom:0; }
+.settings-page-head .icon-btn { font-size:18px; }
+
+/* ── Bet History (detailed bet slips) ────────────────────────────────────── */
+.bet-slip-list { display:flex; flex-direction:column; gap:8px; max-height:min(60cqw, 420px); overflow-y:auto; scrollbar-width:none; -ms-overflow-style:none; }
+.bet-slip-list::-webkit-scrollbar { display:none; }
+.bet-slip { border-radius:10px; padding:10px 12px; border:1px solid; }
+.bet-slip.c-win  { background:#021a10; border-color:#034020; }
+.bet-slip.c-loss { background:#1a0505; border-color:#3a0a0a; }
+.bet-slip-row { display:flex; justify-content:space-between; align-items:center; font-size:12.5px; font-weight:800; color:#dcefff; }
+.bet-slip-row.bet-slip-sub { font-size:11px; font-weight:600; color:var(--dim); margin-top:3px; }
+.bet-slip-time { font-size:9.5px; color:var(--dim); opacity:.65; margin-top:4px; }
+
+/* ── Account Information ─────────────────────────────────────────────────── */
+.account-grid { display:flex; flex-direction:column; gap:2px; margin-bottom:14px; }
+.account-row {
+  display:flex; justify-content:space-between; align-items:center; gap:10px;
+  padding:9px 2px; border-bottom:1px solid var(--border); font-size:12px; color:var(--dim);
+}
+.account-row:last-child { border-bottom:none; }
+.account-row b { color:#dcefff; font-size:12.5px; font-weight:700; text-align:right; }
+.account-note { font-size:10.5px; color:var(--dim); opacity:.8; line-height:1.5; margin-top:12px; }
+
+/* ── Privacy/Terms/About body text ───────────────────────────────────────── */
+.legal-text { display:flex; flex-direction:column; gap:10px; font-size:12px; color:#c8e8f4; line-height:1.6; }
+.legal-text b { color:#dcefff; }
+.legal-text code { background:rgba(255,255,255,.06); padding:1px 5px; border-radius:4px; font-size:11px; }
+
+/* ── Touch-target comfort — only on coarse (touch) pointers, so mouse/trackpad
+   desktop keeps its compact density and only phones/tablets get bigger tap
+   targets. Uses `pointer`, not viewport width, since a touchscreen laptop at
+   a desktop breakpoint still needs comfortable targets. */
+@media (pointer:coarse) {
+  .icon-btn, .info-btn { width:32px; height:32px; min-width:32px; min-height:32px; }
+  .quick button { padding:7px 9px; min-height:30px; }
+  .wm-close { width:30px; height:30px; }
+  .tab-bar button { height:40px; }
+  .settings-item { padding:13px 10px; }
+  .slip-tabs button { height:36px; }
+  .slip-stepper { height:44px; }
+  .slip-stepper > button { width:44px; }
+  .slip-chips button { height:34px; font-size:13.5px; }
+  .slip-range { height:34px; }
+  .slip-auto-grid input { height:40px; }
+  .auto-hint button { height:38px; }
+  /* Phones and tablets: no backdrop blur over the live canvases — re-blurring
+     an animating scene every frame is one of the costliest things a mobile
+     GPU can be asked to do. Slightly more opaque glass reads just as well. */
+  .dist-panel, .fs, .live-zone, #countdownOverlay { backdrop-filter:none; -webkit-backdrop-filter:none; }
+  .dist-panel { background:linear-gradient(180deg, rgba(14,22,38,0.94), rgba(7,11,20,0.96)); }
+  .fs, .live-zone { background:rgba(10,15,28,0.9); }
+  #countdownOverlay { background:rgba(0,0,0,0.62); }
 }
 
-/* ── Mobile landscape / large phones (≤900px) ────────────────────────────── */
-@media (max-width:900px){
-  .round-badge { display:none; }
-  header { padding:6px 14px; }
-  .logo  { font-size:17px; }
-  .balance { font-size:14px; }
+/* ── Mobile bet slip ─────────────────────────────────────────────────────
+   The main button stays pinned to the bottom edge while the slip is on
+   screen, so betting never means scrolling. Once the slip column is wide
+   enough (a portrait phone, not the narrow landscape column), Bet 1 and
+   Bet 2 sit side by side; tablets cap the slip at a readable width. */
+@media (max-width:1023px) {
+  .side-right .slip-cta { position:sticky; bottom:calc(env(safe-area-inset-bottom) + 8px); z-index:4; }
+  .side-right .slip, .side-right .tab-bar, .side-right .tab-panel { width:100%; max-width:620px; margin-left:auto; margin-right:auto; }
+}
+@container slip (min-width:330px) {
+  .slip { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .slip > * { grid-column:1 / -1; }
+  .slip > .slip-bet { grid-column:auto; }
+  .slip-bet .slip-chips { flex-wrap:wrap; }
+  .slip-bet .slip-chips button { flex:1 1 28%; }
+  .slip-bet .slip-stepper > button { width:34px; }
 }
 
-/* ── Mobile portrait (≤600px) ────────────────────────────────────────────── */
-@media (max-width:600px){
-  body { height:100dvh; }
-  #root { height:100dvh; }
-
-  header { padding:5px 10px; }
-  .logo  { font-size:14px; letter-spacing:2px; }
-  .balance { font-size:13px; }
-
-  .dist-side  { padding:6px 10px; }
-  #distVal    { font-size:26px; }
-  #predDisplay{ font-size:19px; }
-  #distLabel  { font-size:8px; letter-spacing:1px; margin-top:4px; }
-  #statusMsg  { font-size:12px; }
-
-  .fstats { top:5px; right:6px; }
-  .fs     { font-size:9px; }
-
-  .controls {
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    grid-template-areas:
-      "bet  pred"
-      "main main"
-      "hist hist";
-    gap:8px;
-    padding:8px 10px;
-    align-items:start;
+/* ── Landscape phones — too short for game-above-slip, so they sit side by
+   side like the desktop layout: the game fills the left, and the slip (with
+   the info tabs under it) scrolls in its own column on the right. */
+@media (max-width:1023px) and (orientation:landscape) and (max-height:520px) {
+  .app { overflow:hidden; }
+  .layout { display:flex; flex:1; min-height:0; }
+  .game-wrap { flex:1; height:auto; min-width:0; }
+  .side-right {
+    width:clamp(250px, 40vw, 330px); padding:8px 10px calc(env(safe-area-inset-bottom) + 8px);
+    overflow-y:auto; overscroll-behavior:contain; border-left:1px solid var(--border);
+    scrollbar-width:none; -ms-overflow-style:none;
   }
-  .controls > .col:first-child { grid-area:bet; }
-  .controls > .col:nth-child(2){ grid-area:pred; }
-  #mainBtn {
-    grid-area:main; align-self:stretch;
-    min-width:unset; padding:14px 8px; font-size:13px;
-  }
-  .history-col { grid-area:hist; margin-left:0; }
-
-  input[type=number] { width:100%; font-size:16px; }
-
-  .quick button { padding:7px 8px; font-size:11px; }
-  .pred-hint    { font-size:9px; }
-  .chips        { max-width:100%; }
-
-  #resultBox    { padding:18px 16px; min-width:unset; width:90vw; }
-  #resultTitle  { font-size:24px; }
-  #resultDetails{ font-size:11px; }
-  #resultPayout { font-size:17px; }
-  #nextBtn      { padding:10px 20px; font-size:13px; }
-
-  #countdownNum { font-size:70px; }
-  #countdownLabel { font-size:10px; }
+  .side-right::-webkit-scrollbar { display:none; }
+  .slip { gap:6px; }
+  /* Notched phones held sideways: keep the header and slip off the cutout */
+  .app > header { padding-left:max(10px, env(safe-area-inset-left)); padding-right:max(10px, env(safe-area-inset-right)); }
+  .side-right { padding-right:max(10px, env(safe-area-inset-right)); }
+  /* A short canvas: a slimmer HUD so it doesn't crowd the action */
+  .dist-side { padding:3px 12px; }
+  .dv-lbl { font-size:7px; letter-spacing:1.4px; }
+  #distVal { font-size:22px; }
+  #predDisplay { font-size:15px; }
+  #distLabel { display:none; }
+  .live-zone { margin-top:4px; font-size:9px; padding:3px 10px; }
+  .fs { font-size:8.5px; padding:2px 8px; }
+  #countdownNum { font-size:76px; }
+}
+/* Short screens (landscape phones, small phones): a tighter result card so
+   it fits without scrolling. */
+@media (max-height: 560px) {
+  #resultBox { padding:12px 14px 12px; }
+  .result-title { margin:2px 0 8px; font-size:26px; }
+  .result-facts { margin-bottom:8px; }
+  .result-facts div { padding:5px 4px; }
+  .result-facts b { font-size:18px; }
+  .result-bets { margin:6px 0 6px; gap:3px; }
+  .result-bet { padding:5px 10px; }
+  #nextBtn { height:42px; margin-top:8px; font-size:17px; }
 }
 
-/* ── Very small phones (≤380px) ─────────────────────────────────────────── */
-@media (max-width:380px){
-  #distVal      { font-size:21px; }
-  #predDisplay  { font-size:16px; }
-  .quick button { padding:6px 6px; font-size:10px; }
-  .pred-hint    { display:none; }
-  .flbl         { font-size:9px; }
-  .logo         { font-size:12px; }
+/* ── Desktop/laptop: full-window 3-column layout ──────────────────────────
+   At ≥1024px the app uses the whole browser window: session, recent rounds
+   and payout rules on the left, the game filling the middle, and the bet
+   slip on the right. Below this breakpoint (phones, tablets, phones in
+   landscape) the single-column mobile layout applies instead. This block is
+   deliberately last so it wins the cascade over the mobile-first rules
+   above it without needing !important anywhere. */
+@media (min-width:1024px) {
+  .phone-frame {
+    width:100vw; height:100dvh;
+    border-radius:0; border:none; box-shadow:none;
+  }
+  .app { overflow:hidden; }
+
+  .layout { display:flex; flex:1; min-height:0; overflow:hidden; }
+  .game-wrap { flex:1; width:auto; height:auto; min-height:0; }
+
+  .side-panel {
+    display:flex; flex-direction:column; gap:10px;
+    flex-shrink:0; padding:12px 14px;
+    background:linear-gradient(180deg, #0A101E, #070B15); overflow-y:auto;
+    scrollbar-width:none; -ms-overflow-style:none;
+  }
+  .side-panel::-webkit-scrollbar { display:none; }
+  /* Capped so the slip column never crosses the 330px two-up threshold. */
+  .side-right { width:clamp(280px, 23vw, 320px); border-left:1px solid var(--border); }
+
+  /* The info column: wide, with large type, always fitting the window. The
+     session and payout cards keep their size (scaled to the window height),
+     and Recent rounds takes whatever height is left, scrolling inside
+     itself — so nothing ever runs off the bottom of the screen. */
+  .side-left {
+    width:clamp(180px, 13.8vw, 222px); gap:clamp(8px, 1.3vh, 12px); padding:clamp(8px, 1.3vh, 12px) 10px;
+    border-right:1px solid var(--border); overflow:hidden;
+  }
+  .side-left .info-card { padding:clamp(9px, 1.5vh, 13px) 12px; gap:clamp(7px, 1.2vh, 10px); border-radius:14px; flex-shrink:0; }
+  .side-left .info-title { font-size:10.5px; }
+  .side-left .session-badge { font-size:clamp(13px, 1.8vh, 15px); padding:clamp(3px, 0.6vh, 5px) 11px; }
+  .side-left .session-best { font-size:11.5px; }
+  /* Narrow column: the session figures stack as label / value rows */
+  .side-left .session-stats { grid-template-columns:1fr; gap:5px; }
+  .side-left .session-stats div { flex-direction:row; align-items:baseline; justify-content:space-between; padding:clamp(5px, 0.9vh, 8px) 10px; border-radius:10px; }
+  .side-left .session-stats span { font-size:10px; }
+  .side-left .session-stats b { font-size:clamp(16px, 2.2vh, 19px); }
+  .side-left .recent-card { flex:1 1 0; min-height:90px; flex-shrink:1; }
+  .side-left .recent-grid {
+    grid-template-columns:1fr; flex:1 1 auto; min-height:0; overflow-y:auto; align-content:start; gap:5px;
+    scrollbar-width:none; -ms-overflow-style:none;
+  }
+  .side-left .recent-grid::-webkit-scrollbar { display:none; }
+  .side-left .recent-chip { flex-direction:row; align-items:baseline; justify-content:space-between; gap:6px; padding:clamp(5px, 0.9vh, 8px) 10px; border-radius:10px; }
+  .side-left .recent-chip b { font-size:clamp(15px, 2.1vh, 18px); }
+  .side-left .recent-chip span { font-size:10.5px; }
+  .side-left .info-empty { font-size:12px; }
+  .side-left .accuracy-track { height:clamp(24px, 3.6vh, 32px); border-radius:9px; }
+  .side-left .az-icon { font-size:13px; }
+  .side-left .az-mult, .side-left .accuracy-scale { display:none; }
+  .side-left .tier-table { gap:clamp(4px, 0.7vh, 6px); }
+  .side-left .tier-row { padding:clamp(5px, 0.9vh, 8px) 9px; gap:7px; border-radius:9px; }
+  .side-left .tier-icon { font-size:clamp(14px, 2vh, 17px); width:18px; }
+  .side-left .tier-label { font-size:clamp(11.5px, 1.5vh, 13px); line-height:1.15; }
+  .side-left .tier-range { font-size:10px; }
+  .side-left .tier-mult { font-size:clamp(15px, 2vh, 18px); }
+  .side-left .info-btn { width:24px; height:24px; font-size:12px; }
+
+  /* The bet column never hides its main button: it stays pinned to the
+     bottom edge if the slip ever runs taller than the window. */
+  .side-right .slip-cta { position:sticky; bottom:0; z-index:4; }
+
+  .mobile-only { display:none; }
+
+  /* Roomier HUD/header text to match the original desktop scale — mobile
+     uses fluid cqw-based sizing tuned for a narrow phone width instead. */
+  .logo { font-size:20px; letter-spacing:4px; }
+  .balance { font-size:16px; }
+  .dist-side { padding:12px 26px; }
+  .dv-lbl { font-size:9px; letter-spacing:3px; margin-bottom:4px; }
+  #distVal { font-size:48px; }
+  #predDisplay { font-size:30px; }
+  #distLabel { font-size:10px; letter-spacing:4px; margin-top:9px; }
+  #statusMsg { font-size:17px; }
+  .fs { font-size:11px; padding:4px 10px; }
+  .live-zone { font-size:13px; margin-top:10px; padding:5px 14px; }
+}
+/* Short desktop windows: tighten both columns so everything still fits —
+   first trim the extras (tier ranges, the accuracy scale), then shrink. */
+@media (min-width:1024px) and (max-height:760px) {
+  .side-left .tier-range, .side-left .accuracy-scale, .side-left .session-best { display:none; }
+  .slip { gap:6px; }
+  .slip-bet, .slip-pred, .slip-auto, .slip-payouts { padding:7px 9px 8px; gap:5px; }
+  .slip-stepper { height:34px; }
+  .slip-payout small { display:none; }
+  .slip-cta { min-height:50px; }
+}
+@media (min-width:1024px) and (max-height:620px) {
+  .side-left .recent-card { display:none; }
+  .slip-chips button { height:24px; }
+}
+
+/* ── Main Menu (lobby) ──────────────────────────────────────────────────────
+   A responsive lobby laid over the live arena (the real engine looping demo
+   jumps on its own canvas). Nothing is a fixed artboard, so nothing stretches. */
+.lobby {
+  position:absolute; inset:0; z-index:50; overflow:hidden;
+  display:flex; flex-direction:column;
+  /* Clear of notches and the home indicator on any phone */
+  padding:max(clamp(14px, 2.4vh, 28px), env(safe-area-inset-top)) max(clamp(16px, 4vw, 64px), env(safe-area-inset-right))
+    max(clamp(14px, 2.4vh, 28px), env(safe-area-inset-bottom)) max(clamp(16px, 4vw, 64px), env(safe-area-inset-left));
+  background:#05070D; color:#F4F7FB; font-family:Inter, system-ui, sans-serif;
+  transition:opacity .3s ease, transform .3s ease;
+}
+/* Leaving for the game: the whole lobby fades and eases forward */
+.lobby.is-leaving { opacity:0; transform:scale(1.02); pointer-events:none; }
+/* Between demo jumps the arena fades out, resets out of sight, fades back */
+.lobby-arena { position:absolute; inset:0; width:100%; height:100%; display:block; transition:opacity .45s ease; }
+.lobby-arena.is-fading { opacity:0; }
+
+/* Entrance: each block rises in, staggered (opacity/transform only, so the
+   compositor runs it smoothly even while the page is busy). After that,
+   switching modes just crossfades the text that changes. */
+@keyframes lobbyIn { from { opacity:0; transform:translate3d(0, 18px, 0); } to { opacity:1; transform:none; } }
+@keyframes lobbySwap { from { opacity:0; transform:translate3d(0, 8px, 0); } to { opacity:1; transform:none; } }
+.lobby:not(.is-ready) .lobby-anim { animation:lobbyIn .75s cubic-bezier(.2, .8, .2, 1) both; animation-delay:var(--d, 0ms); }
+.lobby.is-ready .lobby-swap { animation:lobbySwap .34s cubic-bezier(.2, .8, .2, 1) both; }
+.lobby-shade {
+  position:absolute; inset:0; pointer-events:none;
+  background:
+    linear-gradient(90deg, rgba(5,7,13,0.94) 0%, rgba(5,7,13,0.78) 28%, rgba(5,7,13,0.25) 52%, rgba(5,7,13,0) 70%),
+    linear-gradient(0deg, rgba(5,7,13,0.9) 0%, rgba(5,7,13,0) 26%),
+    linear-gradient(180deg, rgba(5,7,13,0.75) 0%, rgba(5,7,13,0) 16%);
+}
+.lobby-top, .lobby-hero, .lobby-dock { position:relative; z-index:1; }
+
+/* ── Top bar ── */
+.lobby-top { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.lobby-top-right { display:flex; align-items:center; gap:10px; margin-left:auto; }
+/* Glass panels are solid, lightly graded fills with an inner top highlight —
+   no backdrop blur, which would re-blur the moving arena every frame. */
+.lobby-results {
+  display:flex; align-items:center; gap:12px; height:44px; padding:0 7px 0 16px; border-radius:22px;
+  background:linear-gradient(180deg, rgba(20,28,46,0.9), rgba(11,16,28,0.9)); border:1px solid rgba(255,255,255,0.08);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.lobby-results-lbl { font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:#8B97AD; }
+.lobby-results-strip { display:flex; gap:5px; }
+.lobby-chip {
+  min-width:52px; height:30px; padding:0 9px; border-radius:15px;
+  display:inline-flex; align-items:center; justify-content:center;
+  font-family:var(--num); font-size:16px; font-weight:700; border:1px solid transparent;
+}
+.lobby-chip-empty { color:#4A5468; background:rgba(255,255,255,0.03); border-color:rgba(255,255,255,0.05); }
+.lobby-chip-miss  { color:#FF6B7F; background:rgba(255,92,122,0.12); border-color:rgba(255,92,122,0.3); }
+.lobby-chip-win   { color:#5CD6FF; background:rgba(92,214,255,0.12); border-color:rgba(92,214,255,0.3); }
+.lobby-chip-great { color:#2EE59D; background:rgba(46,229,157,0.13); border-color:rgba(46,229,157,0.35); }
+.lobby-chip-top   { color:#FFD23F; background:rgba(255,210,63,0.14); border-color:rgba(255,210,63,0.4); box-shadow:0 0 12px rgba(255,210,63,0.25); }
+
+.lobby-fair, .lobby-balance, .lobby-icon-btn {
+  height:44px; border-radius:22px; display:flex; align-items:center; gap:8px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.lobby-fair {
+  padding:0 15px; font-size:13px; font-weight:600; color:#2EE59D;
+  background:linear-gradient(180deg, rgba(18,44,40,0.92), rgba(10,26,24,0.92)); border:1px solid rgba(46,229,157,0.26);
+}
+.lobby-balance {
+  padding:0 18px 0 13px; color:#2EE59D;
+  background:linear-gradient(180deg, rgba(20,28,46,0.94), rgba(11,16,28,0.94)); border:1px solid rgba(46,229,157,0.32);
+}
+.lobby-balance span { font-family:var(--num); font-size:21px; font-weight:700; }
+.lobby-icon-btn {
+  width:44px; justify-content:center; cursor:pointer; color:rgba(244,247,251,0.8);
+  background:linear-gradient(180deg, rgba(20,28,46,0.94), rgba(11,16,28,0.94)); border:1px solid rgba(255,255,255,0.12);
+  transition:color .16s, border-color .16s, transform .2s;
+}
+.lobby-icon-btn:hover { color:#2EE59D; border-color:rgba(46,229,157,0.45); transform:rotate(28deg); }
+
+/* ── Hero ── */
+.lobby-hero {
+  margin:auto 0; padding:24px 0; max-width:min(620px, 100%);
+  display:flex; flex-direction:column; align-items:flex-start; gap:clamp(12px, 2vh, 20px);
+}
+.lobby-kicker {
+  display:inline-flex; align-items:center; gap:8px;
+  font-size:12px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; color:#2EE59D;
+}
+.lobby-kicker::before { content:''; width:22px; height:2px; border-radius:2px; background:currentColor; }
+.lobby-title-row { display:flex; align-items:center; gap:clamp(8px, 1.1vw, 16px); }
+.lobby-bolt { width:clamp(40px, 5vw, 78px); height:auto; flex:none; filter:drop-shadow(0 0 18px rgba(255,138,31,0.45)); }
+.lobby-title {
+  position:relative; display:inline-block; margin:0; padding-right:.06em;
+  font-family:var(--num); font-weight:800; font-style:italic;
+  font-size:clamp(60px, 8.4vw, 138px); line-height:.86; letter-spacing:.02em; color:#F4F7FB;
+  text-shadow:0 10px 40px rgba(0,0,0,0.45);
+}
+.lobby-title span { color:#2EE59D; }
+/* Light sweep across the wordmark: a copy of the word on top, filled with a
+   moving highlight and clipped to the letters — only the glyphs catch the
+   light, with no blend mode or layout work per frame. */
+.lobby-title::after {
+  content:attr(data-text); position:absolute; inset:0; padding-right:inherit; pointer-events:none;
+  color:transparent; text-shadow:none;
+  background:linear-gradient(100deg, transparent 44%, rgba(255,255,255,0.9) 50%, transparent 56%) no-repeat;
+  background-size:300% 100%; background-position:115% 0;
+  -webkit-background-clip:text; background-clip:text;
+  animation:lobby-shine 4.6s ease-in-out infinite;
+}
+@keyframes lobby-shine { 0% { background-position:115% 0; } 70%, 100% { background-position:-15% 0; } }
+.lobby-desc { margin:0; font-size:clamp(15px, 1.15vw, 18px); line-height:1.55; color:#C5CFDF; max-width:520px; min-height:3.1em; }
+
+.lobby-cta-row { display:flex; align-items:center; gap:12px; }
+.lobby-cta {
+  height:58px; padding:0 34px; border:none; border-radius:29px; cursor:pointer;
+  display:inline-flex; align-items:center; gap:12px;
+  background:linear-gradient(135deg, #2EE59D 0%, #14B97A 100%); color:#03140C;
+  font-family:var(--num); font-size:21px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+  box-shadow:0 0 0 1px rgba(46,229,157,0.5), 0 10px 30px rgba(46,229,157,0.32);
+  transition:transform .16s ease, box-shadow .16s ease;
+  position:relative; isolation:isolate;
+}
+/* Same compositor-only breathing glow as the bet slip's main button */
+.lobby-cta::after {
+  content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none; z-index:-1;
+  box-shadow:0 0 0 7px rgba(46,229,157,0.12), 0 10px 36px rgba(46,229,157,0.48);
+  opacity:0; animation:ctaGlow 2.6s ease-in-out infinite;
+}
+.lobby-cta:hover { transform:translateY(-2px); box-shadow:0 0 0 1px rgba(46,229,157,0.75), 0 14px 38px rgba(46,229,157,0.5); }
+.lobby-cta:active { transform:translateY(0); }
+
+.lobby-stats { display:flex; gap:10px; flex-wrap:wrap; }
+.lobby-stat {
+  position:relative; overflow:hidden; min-width:138px; padding:12px 18px 11px; border-radius:14px;
+  display:flex; flex-direction:column; gap:2px;
+  background:linear-gradient(180deg, rgba(20,28,46,0.9), rgba(11,16,28,0.9)); border:1px solid rgba(255,255,255,0.08);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.lobby-stat::before { content:''; position:absolute; left:0; top:0; right:0; height:3px; background:var(--stat-c, #9AA6BA); box-shadow:0 0 14px var(--stat-c, transparent); }
+.lobby-stat span { font-size:11px; font-weight:600; letter-spacing:.1em; text-transform:uppercase; color:#8B97AD; }
+.lobby-stat b { font-family:var(--num); font-size:24px; font-weight:700; color:#F4F7FB; }
+.lobby-stat-green { --stat-c:#2EE59D; }
+.lobby-stat-green b { color:#2EE59D; }
+.lobby-stat-blue  { --stat-c:#5CD6FF; }
+.lobby-stat-red   { --stat-c:#FF5C7A; }
+.lobby-stat-red b { color:#FF6B7F; }
+.lobby-stat-gold  { --stat-c:#FFD23F; }
+.lobby-stat-gold b { color:#FFD23F; }
+
+/* ── Mode dock ── */
+.lobby-dock {
+  align-self:flex-start; display:flex; gap:6px; padding:6px; border-radius:20px;
+  background:linear-gradient(180deg, rgba(18,26,42,0.92), rgba(10,15,26,0.92)); border:1px solid rgba(255,255,255,0.08);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.06), 0 12px 32px rgba(0,0,0,0.35);
+}
+.lobby-mode {
+  display:flex; align-items:center; gap:9px; height:46px; padding:0 16px; border-radius:14px;
+  border:1px solid transparent; background:transparent; color:#9AA6BA; cursor:pointer;
+  font-family:Inter, system-ui, sans-serif; font-size:14px; font-weight:600; white-space:nowrap;
+  transition:color .16s, background .16s, box-shadow .16s;
+}
+.lobby-mode:hover { color:#F4F7FB; background:rgba(255,255,255,0.06); }
+.lobby-mode.on {
+  color:#03140C; background:linear-gradient(135deg, #2EE59D, #14B97A);
+  box-shadow:0 6px 18px rgba(46,229,157,0.32);
+}
+.lobby-mode:focus-visible, .lobby-cta:focus-visible, .lobby-icon-btn:focus-visible { outline:3px solid #2EE59D; outline-offset:3px; }
+
+@media (max-width: 900px) {
+  .lobby-shade {
+    background:
+      linear-gradient(0deg, rgba(5,7,13,0.96) 0%, rgba(5,7,13,0.82) 42%, rgba(5,7,13,0.25) 72%, rgba(5,7,13,0.55) 100%);
+  }
+  .lobby-results { display:none; }
+  .lobby-hero { margin:auto 0 18px; }
+  .lobby-dock { align-self:stretch; overflow-x:auto; scrollbar-width:none; }
+  .lobby-dock::-webkit-scrollbar { display:none; }
+  .lobby-mode { flex:1 0 auto; justify-content:center; }
+}
+@media (max-width: 520px) {
+  .lobby-fair span { display:none; }
+  .lobby-fair { width:44px; padding:0; justify-content:center; }
+  .lobby-mode span { display:none; }
+  .lobby-mode { padding:0 12px; }
+  /* Stat cards span the full row (the hero shrink-wraps its children) and
+     keep each label and value on one line, so the three cards stay short
+     and even. */
+  .lobby-stats { align-self:stretch; gap:8px; flex-wrap:nowrap; }
+  .lobby-stat { min-width:0; flex:1 1 0; padding:10px 11px; }
+  .lobby-stat span { font-size:10px; letter-spacing:.06em; }
+  .lobby-stat span, .lobby-stat b { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lobby-stat b { font-size:clamp(15px, 4.6vw, 19px); }
+  .lobby-cta { height:52px; padding:0 26px; font-size:19px; }
+}
+/* Narrow phones (≤380px): two stat cards instead of three, and a slightly
+   smaller description, so nothing wraps into a tall stack. */
+@media (max-width: 380px) {
+  .lobby-stat-gold { display:none; }
+  .lobby-stat { flex:1 1 40%; }
+  .lobby-stat b { font-size:17px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .lobby-desc { font-size:14px; }
+}
+/* Phones in landscape: too short for the full hero, so it drops the blurb
+   and stat cards and shrinks the title so the mode dock stays on screen. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .lobby-hero { padding:4px 0; gap:8px; }
+  .lobby-title { font-size:clamp(40px, 14vh, 66px); }
+  .lobby-desc, .lobby-stats { display:none; }
+  .lobby-cta { height:44px; padding:0 22px; font-size:17px; }
+  .lobby-fair, .lobby-balance, .lobby-icon-btn { height:38px; }
+  .lobby-icon-btn { width:38px; }
+  .lobby-mode { height:38px; }
+  .lobby-dock { padding:4px; }
+}
+/* Reduced motion: no entrance, crossfades, shine or glow pulses */
+@media (prefers-reduced-motion: reduce) {
+  .lobby-anim, .lobby-swap, .lobby-title::after, .lobby-cta::after { animation:none !important; }
+  .lobby, .lobby-arena { transition:none; }
 }

@@ -120,9 +120,17 @@ export class GameServer {
   }
 
   // Returns the crash multiplier to drive the next launch, or null if the server
-  // has never supplied one (caller then falls back to local RNG).
+  // has never supplied one (caller then falls back to local RNG). This is a
+  // one-shot take, not a peek: without clearing latestOutcome here, a player
+  // who bets faster than the server's own round cadence would silently get
+  // the same stale roundId/multiplier replayed across multiple flights —
+  // undermining the "provably fair" display (same round shown twice) even
+  // though nothing about the bet itself was wrong. Once taken, the next call
+  // falls back to local RNG until a fresh RoundCrashed arrives.
   takeOutcome() {
-    return this.latestOutcome;
+    const o = this.latestOutcome;
+    this.latestOutcome = null;
+    return o;
   }
 
   async disconnect() {
