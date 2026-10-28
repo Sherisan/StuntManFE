@@ -461,7 +461,12 @@ input[type=number]:disabled { opacity:.5; }
 .slip-cta small { font-family:Inter, 'Segoe UI', sans-serif; font-size:11px; font-weight:600; letter-spacing:.02em; text-transform:none; opacity:.75; }
 .slip-cta:hover:not(:disabled) { transform:translateY(-2px); }
 .slip-cta:active:not(:disabled) { transform:translateY(0) scale(.98); }
-.slip-cta:disabled { opacity:.4; filter:saturate(.4); }
+/* Solid when disabled (not see-through), since on phones the button floats
+   over the slip as it scrolls */
+.slip-cta:disabled {
+  background:linear-gradient(135deg, #263142, #1A2231); color:#8C99AF;
+  box-shadow:0 0 0 1px rgba(255,255,255,0.08), 0 8px 22px rgba(0,0,0,0.45);
+}
 .slip-cta.is-auto { --c1:#FFC14D; --c2:#FF8A1F; --glow:255,170,51; --ink:#1E0E00; }
 .slip-cta.is-stop { --c1:#FF6B7F; --c2:#E02D4C; --glow:255,92,122; --ink:#fff; }
 .slip-cta:focus-visible { outline:3px solid #fff; outline-offset:3px; }
@@ -847,6 +852,48 @@ input[type=number]:disabled { opacity:.5; }
   .slip-bet .slip-stepper > button { width:34px; }
 }
 
+/* ── Phones and tablets: a whole bet on one screen ──────────────────────
+   A shorter game view, then a tighter slip: the landing pick first (it's
+   the call that wins or loses), the two stakes side by side with their
+   quick amounts on one swipeable row each, the payouts as a slim strip,
+   and the bet button pinned to the bottom edge. */
+@media (max-width:1023px) {
+  .game-wrap { height:min(100vw, 46dvh); }
+  .slip { gap:7px; }
+  .slip-head { order:-2; }
+  .slip-pred, .slip-auto { order:-1; }
+  .slip-bet, .slip-pred, .slip-auto, .slip-payouts { padding:8px 10px 9px; gap:6px; }
+  .slip-chips { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; overscroll-behavior-x:contain; }
+  .slip-chips::-webkit-scrollbar { display:none; }
+  .slip-bet .slip-chips { flex-wrap:nowrap; }
+  .slip-bet .slip-chips button, .slip-pred .slip-chips button, .slip-auto .slip-chips button { flex:0 0 auto; min-width:46px; padding:0 10px; }
+  /* The bet button comes straight after the stakes; the payouts follow it */
+  .slip-payouts { order:2; padding:7px 8px; gap:5px; }
+  .slip-hint { order:3; }
+  .slip-payout { flex-direction:row; justify-content:center; gap:6px; padding:6px 4px; }
+  .slip-payout small { display:none; }
+  .slip-payout b { font-size:14px; }
+  .slip-cta { min-height:54px; }
+}
+/* Portrait phones of any width keep the two stakes side by side, and short
+   phones (an iPhone SE) give the game a little less height so the stakes
+   and the bet button still fit under it without scrolling. */
+@media (max-width:1023px) and (orientation:portrait) {
+  .slip { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .slip > * { grid-column:1 / -1; }
+  .slip > .slip-bet { grid-column:auto; }
+  .slip-bet .slip-stepper > button { width:34px; }
+}
+@media (max-width:1023px) and (orientation:portrait) and (max-height:720px) {
+  .game-wrap { height:min(100vw, 38dvh); }
+  .slip-range { height:28px; }
+}
+@media (max-width:360px) {
+  .slip-bet .slip-stepper > button { width:30px; }
+  .slip-amount { padding:0 6px; }
+  .slip-amount input { font-size:18px; }
+}
+
 /* ── Landscape phones — too short for game-above-slip, so they sit side by
    side like the desktop layout: the game fills the left, and the slip (with
    the info tabs under it) scrolls in its own column on the right. */
@@ -1094,7 +1141,9 @@ input[type=number]:disabled { opacity:.5; }
   animation:lobby-shine 4.6s ease-in-out infinite;
 }
 @keyframes lobby-shine { 0% { background-position:115% 0; } 70%, 100% { background-position:-15% 0; } }
+.lobby-intro, .lobby-actions { display:flex; flex-direction:column; align-items:flex-start; gap:inherit; }
 .lobby-desc { margin:0; font-size:clamp(15px, 1.15vw, 18px); line-height:1.55; color:#C5CFDF; max-width:520px; min-height:3.1em; }
+.lobby-desc-short { display:none; }
 
 .lobby-cta-row { display:flex; align-items:center; gap:12px; }
 .lobby-cta {
@@ -1185,6 +1234,30 @@ input[type=number]:disabled { opacity:.5; }
   .lobby-stat { flex:1 1 40%; }
   .lobby-stat b { font-size:17px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .lobby-desc { font-size:14px; }
+}
+/* Phones in portrait: the title and a one-line pitch move up to the top
+   left, the Play button and stats sit down by the thumb, and the arena is
+   shortened so its ramp and rider play in the clear middle of the screen. */
+@media (max-width: 600px) and (min-height: 561px) {
+  .lobby-arena { bottom:auto; height:80%; }
+  .lobby-shade {
+    background:
+      radial-gradient(150% 62% at 0% 0%, rgba(5,7,13,0.96) 0%, rgba(5,7,13,0.82) 40%, rgba(5,7,13,0) 72%),
+      linear-gradient(0deg, rgba(5,7,13,1) 0%, rgba(5,7,13,0.94) 28%, rgba(5,7,13,0) 46%);
+  }
+  .lobby-hero { flex:1; margin:0; padding:12px 0 14px; max-width:none; align-items:stretch; justify-content:space-between; gap:12px; }
+  .lobby-intro { align-items:flex-start; text-align:left; gap:7px; }
+  .lobby-kicker { font-size:10.5px; letter-spacing:.14em; }
+  .lobby-kicker::before { width:16px; }
+  .lobby-title-row { gap:8px; }
+  .lobby-bolt { width:26px; }
+  .lobby-title { font-size:clamp(40px, 12.5vw, 56px); }
+  .lobby-desc { min-height:0; max-width:220px; font-size:13.5px; line-height:1.4; text-shadow:0 1px 3px #05070D, 0 0 14px rgba(5,7,13,0.9); }
+  .lobby-desc-full { display:none; }
+  .lobby-desc-short { display:inline; }
+  .lobby-actions { align-items:stretch; gap:12px; }
+  .lobby-cta-row { align-self:stretch; }
+  .lobby-cta { flex:1; justify-content:center; }
 }
 /* Phones in landscape: too short for the full hero, so it drops the blurb
    and stat cards and shrinks the title so the mode dock stays on screen. */

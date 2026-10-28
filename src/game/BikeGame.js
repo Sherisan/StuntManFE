@@ -14,15 +14,21 @@ const WEATHERS = [
 ];
 
 // ── Ramp geometry (pure helpers) ───────────────────────────────────────────
+// The ramp is the same kicker at every screen size — only its size changes,
+// by `s` — so it never turns into a steep spike on a narrow phone. The
+// flight physics (gravity, speeds) and the pixels-per-metre scale by the
+// same `s`, so a round's launch angle and drop are identical everywhere and
+// it lands the same number of metres out on a phone as on a desktop.
 function computeRamp(W, H) {
+  const s = Math.max(0.55, Math.min(1.2, H / 560, W / 500));
   const gY = H * 0.72;
   const rx = W * 0.40;
-  const rw = W * 0.14;
-  const rh = H * 0.20;
+  const rw = 150 * s;
+  const rh = 146 * s;
   const P0 = { x: rx, y: gY };
   const P1 = { x: rx + rw * 0.55, y: gY - rh * 0.40 };
   const P2 = { x: rx + rw, y: gY - rh };
-  return { gY, P0, P1, P2, rx, rw, rh };
+  return { gY, P0, P1, P2, rx, rw, rh, s };
 }
 function bp(P0, P1, P2, t) { const m = 1 - t; return { x: m * m * P0.x + 2 * m * t * P1.x + t * t * P2.x, y: m * m * P0.y + 2 * m * t * P1.y + t * t * P2.y }; }
 function bt(P0, P1, P2, t) { const m = 1 - t; return { x: 2 * m * (P1.x - P0.x) + 2 * t * (P2.x - P1.x), y: 2 * m * (P1.y - P0.y) + 2 * t * (P2.y - P1.y) }; }
@@ -268,7 +274,10 @@ export class BikeGame {
   getRamp() { if (!this.R) this.R = computeRamp(this.cw, this.ch); return this.R; }
 
   calcMult(ms) { return Math.pow(1 + ms / 9000, 2.7); }
-  toMeters(worldX, r) { return Math.max(0, Math.round((worldX - r.P2.x) * 0.22)); }
+  // Metres past the launch lip; one metre is 1/0.22 px at full size, scaled
+  // with the ramp (see computeRamp)
+  toMeters(worldX, r) { return Math.max(0, Math.round(((worldX - r.P2.x) * 0.22) / r.s)); }
+  mToPx(m, r) { return (m / 0.22) * r.s; }
 
   async initRNG() {
     this.serverSeed = rh16(16); this.clientSeed = rh16(8);
@@ -354,7 +363,7 @@ export class BikeGame {
   // ballistic (see physStep: gravity 0.14 per 60fps frame), so it's known the
   // moment the bike leaves the ramp — which lets every trick finish in time.
   flightMs(r) {
-    const g = 0.14, v = this.bvy, drop = r.gY - this.by;
+    const g = 0.14 * r.s, v = this.bvy, drop = r.gY - this.by;
     return ((-v + Math.sqrt(v * v + 2 * g * drop)) / g) * 16.6667;
   }
 
@@ -520,7 +529,7 @@ export class BikeGame {
 
     if (this.phase === 'approach') {
       if (!this.approachTs) this.approachTs = ts;
-      this.bvx = 3.8 + (ts - this.approachTs) / 160; this.bx += this.bvx; this.by = r.gY; this.camX = this.camBias();
+      this.bvx = (3.8 + (ts - this.approachTs) / 160) * r.s; this.bx += this.bvx; this.by = r.gY; this.camX = this.camBias();
       this.camY = this.camLerp(this.camY, 0, 0.08, camDt);
       this.drawScene(ts, false);
       if (this.bx >= r.P0.x) { this.bx = r.P0.x; this.by = r.P0.y; this.rampT = 0; this.rampTs = ts; this.phase = 'ramp'; }
@@ -534,7 +543,7 @@ export class BikeGame {
       this.drawScene(ts, false);
       if (this.rampT >= 1) {
         const tn = bt(r.P0, r.P1, r.P2, 1);
-        const spd = 8 + Math.log(Math.max(1.01, this.crashAt)) / Math.log(200) * 32;
+        const spd = (8 + Math.log(Math.max(1.01, this.crashAt)) / Math.log(200) * 32) * r.s;
         const len = Math.hypot(tn.x, tn.y);
         this.bvx = (tn.x / len) * spd; this.bvy = (tn.y / len) * spd;
         this.phase = 'flying'; this.flyTs = ts; this.physTs = ts;
@@ -609,8 +618,8 @@ export class BikeGame {
   physStep(r, ts) {
     const dt = this.physTs != null ? Math.min(3, Math.max(0.1, (ts - this.physTs) / 16.6667)) : 1;
     this.physTs = ts;
-    this.bvy += 0.14 * dt; this.bx += this.bvx * dt; this.by += this.bvy * dt;
-    if (this.phase !== 'crashing') this.bvx = 3.2 + this.mult * 0.85;
+    this.bvy += 0.14 * r.s * dt; this.bx += this.bvx * dt; this.by += this.bvy * dt;
+    if (this.phase !== 'crashing') this.bvx = (3.2 + this.mult * 0.85) * r.s;
     if (this.by >= r.gY) {
       this.by = r.gY;
       if (this.phase === 'flying') {
@@ -657,18 +666,26 @@ export class BikeGame {
     const floor = this.getRamp().gY + 21 * BIKE_SCALE;
     this.particles.forEach((p) => {
       p.x += p.vx; p.y += p.vy;
-      p.vy += p.type === 'smoke' ? -0.01 : p.type === 'ember' ? 0.12 : p.type === 'confetti' ? 0.1 : 0.22;
-      p.vx *= p.type === 'confetti' ? 0.97 : 0.99;
+      p.vy += p.type === 'smoke' ? -0.01 : p.type === 'flame' ? -0.03 : p.type === 'ember' ? 0.12 : p.type === 'confetti' ? 0.1 : 0.22;
+      p.vx *= p.type === 'confetti' || p.type === 'flame' ? 0.97 : 0.99;
       p.rot += p.spin;
       p.life -= p.decay;
-      if (p.type !== 'ember' && p.type !== 'smoke' && p.y > floor) { p.y = floor; p.vy *= -0.3; p.vx *= 0.6; p.spin *= 0.5; }
+      if (p.type !== 'ember' && p.type !== 'smoke' && p.type !== 'flame' && p.y > floor) { p.y = floor; p.vy *= -0.3; p.vx *= 0.6; p.spin *= 0.5; }
       if (p.life <= 0) return;
       const sx = p.x - this.camX;
+      if (p.type === 'flame') {
+        // A scrap of fire shed by the burning bike: flares, swells and cools
+        // from yellow to deep red as it drifts up and falls behind
+        const age = 1 - p.life, r = p.r * (0.7 + age * 1.3), img = this.fireSprites().fire[Math.min(7, 1 + Math.floor(age * 7))];
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = Math.min(1, p.life * 1.8) * 0.85;
+        ctx.drawImage(img, sx - r, p.y - r, r * 2, r * 2);
+        ctx.restore();
+        return;
+      }
       if (p.type === 'smoke') {
-        // Smoke from the burning bike: puffs that swell and thin out
-        const r = p.r * (1 + (1 - p.life) * 2.2);
-        ctx.fillStyle = `rgba(62,56,58,${0.38 * p.life})`;
-        ctx.beginPath(); ctx.arc(sx, p.y, r, 0, Math.PI * 2); ctx.fill();
+        // Smoke from the burning bike: soft puffs that swell and thin out
+        const r = p.r * (1.4 + (1 - p.life) * 2.8), img = this.fireSprites().smoke[1];
+        ctx.globalAlpha = 0.55 * p.life; ctx.drawImage(img, sx - r, p.y - r, r * 2, r * 2); ctx.globalAlpha = 1;
         return;
       }
       if (p.type === 'debris') {
@@ -713,7 +730,7 @@ export class BikeGame {
     ctx.translate(0, this.camY);
     this.drawBg(W, H, ts, r);
     this.drawStadium(W, H, r.gY, ts);
-    this.drawRamp(r);
+    this.drawRamp(r, ts);
     this.drawPredMarker(r, H);
     this.trail.push({ x: this.bx, y: this.by });
     if (this.trail.length > 65) this.trail.shift();
@@ -748,7 +765,7 @@ export class BikeGame {
     const W = this.cw, H = this.ch, r = this.getRamp(); this.camX = this.camBias();
     this.ctx.clearRect(0, 0, W, H);
     this.drawSky(W, H, ts);
-    this.drawBg(W, H, ts, r); this.drawStadium(W, H, r.gY, ts); this.drawRamp(r);
+    this.drawBg(W, H, ts, r); this.drawStadium(W, H, r.gY, ts); this.drawRamp(r, ts);
     this.drawBiker(this.startX(r) - this.camX, r.gY, false, ts);
   }
 
@@ -773,7 +790,7 @@ export class BikeGame {
   drawPredMarker(r, H) {
     if (this.phase !== 'flying' && this.phase !== 'crashing') return;
     const ctx = this.ctx;
-    const wx = r.P2.x + this.pred / 0.22;
+    const wx = r.P2.x + this.mToPx(this.pred, r);
     const sx = wx - this.camX;
     if (sx < -60 || sx > this.cw + 60) return;
     ctx.strokeStyle = 'rgba(255,210,63,0.8)'; ctx.lineWidth = 2;
@@ -1113,7 +1130,7 @@ export class BikeGame {
       [[0, 0, 7], [-16, -7, 6.4], [-15, 8, 6.6], [-31, -13, 6], [-30, 15, 6.2], [-47, -19, 5.6], [-45, 22, 5.8], [-62, -24, 5.1], [-60, 28, 5.3]]
         .forEach(([dx, dy, s], i) => {
           const bob = Math.sin(ts * 0.0016 + i * 1.3) * 1.6;
-          this.drawBird(lx + dx, ly + dy * 0.6 + bob, s, ts * 0.011 + i * 0.9, 'rgba(14,22,42,0.78)', null);
+          this.drawBird(lx + dx, ly + dy * 0.6 + bob, s * 1.2, ts * 0.011 + i * 0.9, 'rgba(14,22,42,0.8)', 'rgba(170,192,236,0.35)');
         });
       return;
     }
@@ -1124,14 +1141,35 @@ export class BikeGame {
       this.drawOwl(ox, moon.y + moon.R * 0.12 + Math.sin(ot * Math.PI * 6) * 5, Math.max(16, moon.R * 0.42), ts * 0.0042);
     }
     [
-      { y: H * 0.25, period: 23000, off: 11000, size: 17, wf: 0.011 },
-      { y: H * 0.18, period: 29000, off: 21000, size: 13, wf: 0.012 },
+      { y: H * 0.25, period: 23000, off: 11000, size: 22, wf: 0.011 },
+      { y: H * 0.18, period: 29000, off: 21000, size: 17, wf: 0.012 },
     ].forEach((b, i) => {
       const t = ((ts + b.off) % b.period) / b.period;
       this.drawGull(-90 + t * (W + 200), b.y + Math.sin(t * Math.PI * 4 + i) * 7, b.size, ts * b.wf + i * 1.7);
     });
+    // The dragon on patrol: every seven seconds it builds fire in its throat,
+    // dips its head, opens up and breathes a short burst, then smoke curls
+    // from its nostrils
     const d = this.flyDragon(W, H, ts);
-    if (d.mode === 'patrol') this.drawDragon(d.x, d.y, d.scale, ts * 0.0032, ts, 1, true);
+    if (d.mode === 'patrol') {
+      const phase = ts * 0.0032, ft = (ts % 7000) / 7000;
+      const breath = ft < 0.2 ? Math.sin((ft / 0.2) * Math.PI) : 0;
+      const pose = { tilt: 0.24 * breath, jaw: Math.min(1, breath * 1.6), glow: ft > 0.9 ? (ft - 0.9) / 0.1 : breath };
+      this.drawDragon(d.x, d.y, d.scale, phase, ts, 1, pose);
+      const m = this.dragonMouth(d, phase, pose.tilt);
+      if (breath > 0) {
+        const len = 78 * d.scale * breath;
+        this.drawFireStream(m.x, m.y, m.x + Math.cos(m.a) * len, m.y + Math.sin(m.a) * len, breath, ts, 5.5 * d.scale);
+      } else if (ft < 0.34) {
+        const k = (ft - 0.2) / 0.14, { smoke } = this.fireSprites(), ctx = this.ctx;
+        for (let i = 0; i < 3; i++) {
+          const r = (2 + k * 5 + i * 1.5) * d.scale;
+          ctx.globalAlpha = 0.4 * (1 - k);
+          ctx.drawImage(smoke[0], m.x - 2 * d.scale + (k * 8 + i * 3) * d.scale - r, m.y - (k * 9 + i * 2.5) * d.scale - r, r * 2, r * 2);
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
   }
 
   // The dragon's flight. On patrol it crosses the sky on a slow loop. On
@@ -1144,7 +1182,7 @@ export class BikeGame {
     const d = this._dragon || (this._dragon = { mode: 'patrol', x: -999, y: 0, facing: 1, t0: 0, ts: null });
     const step = d.ts == null ? 1 : Math.min(3, Math.max(0.1, (ts - d.ts) / 16.6667));
     d.ts = ts;
-    d.scale = Math.max(1, Math.min(1.6, W / 800));
+    d.scale = Math.max(1, Math.min(1.75, W / 760));
     const pt = ((ts + 19000) % 36000) / 36000;
     const px = -160 + pt * (W + 340), py = H * 0.09 + Math.sin(pt * 8) * 6;
     const flying = this.phase === 'flying';
@@ -1175,87 +1213,249 @@ export class BikeGame {
     return d;
   }
 
-  // The attacking dragon and its fire jet, in screen space on top of the
-  // world. The jet is aimed straight at the rider; once it connects, rider
-  // and bike burn for the rest of the flight (see drawBurning).
+  // Where the dragon's mouth is on screen (and which way its head points),
+  // for a dragon drawn by drawDragon at `d` with this wingbeat phase and
+  // head tilt. Mirrors drawDragon's transforms: the neck pivots at its
+  // base, the head sits tipped down slightly at the end of it.
+  dragonMouth(d, phase, tilt) {
+    const a = tilt + Math.sin(phase * 0.5 + 1) * 0.07, ox = 32.5 - 8.5, oy = -8 + 3.5;
+    const mx = 8.5 + ox * Math.cos(a) - oy * Math.sin(a), my = -3.5 + ox * Math.sin(a) + oy * Math.cos(a);
+    return { x: d.x + mx * d.scale * d.facing, y: d.y + Math.sin(phase) * 2.4 + my * d.scale, a: a + 0.08 };
+  }
+
+  // The attacking dragon and its fire, in screen space on top of the world.
+  // Swooping in it snarls, jaw ajar, with fire already glowing in its
+  // throat; in the blast it dips its head to aim and pours a stream of fire
+  // straight at the rider. Once it connects, rider and bike burn for the
+  // rest of the flight (see drawBurning).
   drawDragonAttack(ts) {
     const d = this._dragon;
     if (!d || (d.mode !== 'swoop' && d.mode !== 'blast' && d.mode !== 'leave')) return;
     const phase = ts * 0.0032;
-    this.drawDragon(d.x, d.y, d.scale, phase, ts, d.facing, false);
-    if (d.mode !== 'blast') return;
-    const k = Math.min(1, (ts - d.t0) / 950), jet = Math.sin(k * Math.PI);
-    const mx = d.x + 29 * d.scale * d.facing, my = d.y + Math.sin(phase) * 2.4 - 5 * d.scale;
     const rx = this.bx - this.camX, ry = this.by + this.camY - 26 * BIKE_SCALE;
-    this.drawFireJet(mx, my, rx, ry, jet, ts);
+    const blast = d.mode === 'blast', k = blast ? Math.min(1, (ts - d.t0) / 950) : 0, jet = Math.sin(k * Math.PI);
+    let tilt = 0;
+    if (d.mode !== 'leave') {
+      const m0 = this.dragonMouth(d, phase, 0);
+      tilt = Math.max(-0.3, Math.min(0.75, Math.atan2(ry - m0.y, Math.abs(rx - m0.x)) - 0.08));
+    }
+    const pose = blast
+      ? { tilt, jaw: Math.min(1, k * 6) * Math.min(1, (1 - k) * 6), glow: 1 - k }
+      : { tilt, jaw: d.mode === 'swoop' ? 0.3 : 0, glow: d.mode === 'swoop' ? 0.7 : 0 };
+    this.drawDragon(d.x, d.y, d.scale, phase, ts, d.facing, pose);
+    if (!blast) return;
+    const m = this.dragonMouth(d, phase, tilt);
+    this.drawFireStream(m.x, m.y, rx, ry, jet, ts, 8.5 * d.scale);
     if (k > 0.32 && this.burnT == null && this.phase === 'flying') this.burnT = ts;
   }
 
-  // A jet of dragon fire from (x0, y0) toward (x1, y1): layered cones — red
-  // edges, orange body, white-hot core — that flicker, throw embers, and
-  // light the air around them. `k` (0…1) grows it out and back.
-  drawFireJet(x0, y0, x1, y1, k, ts) {
-    if (k <= 0.01) return;
-    const ctx = this.ctx, L = Math.hypot(x1 - x0, y1 - y0) * Math.min(1.08, k * 1.6);
-    ctx.save(); ctx.translate(x0, y0); ctx.rotate(Math.atan2(y1 - y0, x1 - x0));
-    ctx.globalCompositeOperation = 'lighter';
-    const glow = ctx.createRadialGradient(L * 0.5, 0, 0, L * 0.5, 0, L * 0.6 + 20);
-    glow.addColorStop(0, `rgba(255,140,50,${0.35 * k})`); glow.addColorStop(1, 'rgba(255,90,30,0)');
-    ctx.fillStyle = glow; ctx.fillRect(-20, -L * 0.6 - 20, L + 40, L * 1.2 + 40);
-    const cone = (w, c0, c1, reach) => {
-      const len = L * reach, wob = Math.sin(ts * 0.045) * w * 0.3;
-      const g = ctx.createLinearGradient(0, 0, len, 0);
-      g.addColorStop(0, c0); g.addColorStop(1, c1);
-      ctx.fillStyle = g; ctx.beginPath();
-      ctx.moveTo(0, -w * 0.15);
-      ctx.quadraticCurveTo(len * 0.5, -w - wob, len, wob * 0.5);
-      ctx.quadraticCurveTo(len * 0.5, w - wob, 0, w * 0.15);
-      ctx.closePath(); ctx.fill();
+  // Cached soft puffs for fire and smoke, so a flame can be dozens of
+  // overlapping blobs for the price of a drawImage each. `fire[0]` is
+  // white-hot, cooling through yellow, orange and red to `fire[7]`; `smoke`
+  // runs from a warm grey to near-black.
+  fireSprites() {
+    if (this._fireSprites) return this._fireSprites;
+    const make = ([r, g, b], core) => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const x = c.getContext('2d'), gr = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, `rgba(${core || [r, g, b]},1)`);
+      gr.addColorStop(0.38, `rgba(${r},${g},${b},0.66)`);
+      gr.addColorStop(0.72, `rgba(${r},${g},${b},0.2)`);
+      gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+      x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
+      return c;
     };
-    const spread = 6 + L * 0.11;
-    cone(spread, `rgba(255,80,26,${0.9 * k})`, 'rgba(255,50,20,0)', 1);
-    cone(spread * 0.62, `rgba(255,176,60,${0.92 * k})`, 'rgba(255,130,40,0.15)', 0.9);
-    cone(spread * 0.28, `rgba(255,250,222,${k})`, 'rgba(255,224,150,0)', 0.62);
+    const fire = [[255, 244, 210], [255, 224, 136], [255, 192, 80], [255, 150, 48], [255, 112, 34], [234, 74, 26], [186, 44, 22], [116, 28, 18]]
+      .map((c, i) => make(c, i === 0 ? [255, 255, 250] : i === 1 ? [255, 250, 222] : null));
+    const smoke = [[96, 86, 84], [64, 58, 58], [34, 30, 32]].map((c) => make(c));
+    return (this._fireSprites = { fire, smoke });
+  }
+
+  // Cached solid, shaded billows for the crash fireball and its mushroom
+  // cloud — each one a rounded puff with a soft edge, so a cloud built from
+  // dozens of them looks lumpy and three-dimensional. `fire[0]` is
+  // white-hot, cooling to sooty brown at `fire[5]`; the `smoke` puffs are
+  // lit from the upper left, by the moon.
+  billowSprites() {
+    if (this._billows) return this._billows;
+    const make = (stops, fx, fy) => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const x = c.getContext('2d'), gr = x.createRadialGradient(fx, fy, 1, 32, 32, 32);
+      stops.forEach(([o, col]) => gr.addColorStop(o, col));
+      x.fillStyle = gr; x.fillRect(0, 0, 64, 64);
+      return c;
+    };
+    const fire = [
+      ['255,252,234', '255,228,146', '255,172,64'], ['255,238,166', '255,184,72', '236,98,32'], ['255,204,100', '246,124,38', '192,60,24'],
+      ['242,144,58', '204,80,30', '130,42,22'], ['172,90,48', '120,54,34', '72,40,30'], ['100,74,60', '68,50,44', '42,32,30'],
+    ].map(([a, b, c]) => make([[0, `rgba(${a},1)`], [0.52, `rgba(${b},1)`], [0.8, `rgba(${c},0.85)`], [1, `rgba(${c},0)`]], 30, 28));
+    const smoke = [['150,140,136', '92,84,82', '46,40,40'], ['118,108,104', '72,64,62', '34,30,30'], ['84,76,74', '52,46,46', '24,20,20']]
+      .map(([a, b, c]) => make([[0, `rgba(${a},1)`], [0.48, `rgba(${b},1)`], [0.86, `rgba(${c},0.97)`], [1, `rgba(${c},0)`]], 22, 20));
+    return (this._billows = { fire, smoke });
+  }
+
+  // A roaring stream of fire from (x0, y0) toward (x1, y1): dozens of soft
+  // puffs pouring out of a white-hot throat, swelling, rising and cooling
+  // from yellow through orange to red as they go, breaking up into smoke at
+  // the far end and splashing round whatever they hit, with sparks spitting
+  // off the sides. `k` (0…1) is how hard it's blowing — it grows the stream
+  // out and back — and `w` its width at the mouth. Purely a function of
+  // `ts`, so it needs no state.
+  drawFireStream(x0, y0, x1, y1, k, ts, w = 9) {
+    if (k <= 0.01) return;
+    const ctx = this.ctx, { fire, smoke } = this.fireSprites();
+    const dx = x1 - x0, dy = y1 - y0, D = Math.hypot(dx, dy) || 1, ux = dx / D, uy = dy / D, nx = -uy, ny = ux;
+    const hash = (i) => { const v = Math.sin(i * 91.173 + 3.1) * 43758.5453; return v - Math.floor(v); };
+    const front = Math.min(1, k * 1.8), n = this.lowPower ? 26 : 52;
+    const at = (u, lat, lift) => ({ x: x0 + ux * D * u + nx * lat, y: y0 + uy * D * u + ny * lat - lift });
+    const puff = (img, p, r, a) => { if (a > 0.01 && r > 0.3) { ctx.globalAlpha = Math.min(1, a); ctx.drawImage(img, p.x - r, p.y - r, r * 2, r * 2); } };
+    ctx.save();
+    // Smoke rolling off the far end, behind the flames
     for (let i = 0; i < 9; i++) {
-      const t = ((ts * 0.0025 + i * 0.137) % 1), ex = L * t, ey = Math.sin(ts * 0.02 + i * 2.1) * spread * t * 0.7;
-      ctx.fillStyle = `rgba(255,${150 + (i % 4) * 22},60,${(1 - t) * 0.85 * k})`;
-      ctx.beginPath(); ctx.arc(ex, ey, 1.1 + (i % 3) * 0.6, 0, Math.PI * 2); ctx.fill();
+      const u = (ts / 1100 + i / 9) % 1, s = 0.62 + u * 0.5;
+      if (s > front + 0.12) continue;
+      const p = at(s, (hash(i + 40) - 0.5) * w * 2.4, u * w * 3.2 + s * s * w);
+      puff(smoke[i % 3], p, w * (1.1 + u * 1.9), k * 0.36 * Math.sin(u * Math.PI));
     }
+    ctx.globalCompositeOperation = 'lighter';
+    // Light thrown on the air round the jet
+    puff(fire[3], at(0.4, 0, 0), D * 0.3 + w * 2.5, 0.16 * k);
+    // The body of the jet: a continuous tongue, rippling along its edges,
+    // white-hot at the throat and burning out to red at the far end
+    const reach = D * front, steps = 14;
+    ctx.globalAlpha = k;
+    const body = ctx.createLinearGradient(x0, y0, x0 + ux * reach, y0 + uy * reach);
+    body.addColorStop(0, 'rgba(255,250,226,0.95)'); body.addColorStop(0.18, 'rgba(255,210,100,0.85)');
+    body.addColorStop(0.5, 'rgba(255,128,40,0.6)'); body.addColorStop(0.8, 'rgba(220,60,24,0.3)'); body.addColorStop(1, 'rgba(160,30,16,0)');
+    ctx.fillStyle = body; ctx.beginPath();
+    for (let side = -1; side <= 1; side += 2) {
+      for (let j = 0; j <= steps; j++) {
+        const t = side < 0 ? j / steps : 1 - j / steps, u = t * front;
+        const half = w * (0.22 + u * 0.95) * (1 + Math.sin(u * 19 - ts * 0.03 + side * 1.3) * 0.18);
+        const p = at(u, side * half, u * u * w * 1.6);
+        if (side < 0 && j === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      }
+    }
+    ctx.closePath(); ctx.fill();
+    // Turbulence: puffs flowing mouth to target, swelling and cooling
+    for (let i = 0; i < n; i++) {
+      const u = (ts / 520 + i / n + hash(i) * 0.05) % 1;
+      if (u > front) continue;
+      const wob = Math.sin(u * 8 + ts * 0.011 + i * 1.7);
+      const lat = ((hash(i + 7) - 0.5) * 0.8 + wob * 0.3) * w * (0.2 + u * 1.2);
+      const heat = Math.min(7, Math.floor((u * 1.02 + hash(i + 11) * 0.2) * 8));
+      const r = w * (0.5 + u * 1.35) * (0.8 + hash(i + 3) * 0.45);
+      puff(fire[heat], at(u, lat, u * u * w * 1.6), r, k * Math.min(1, u * 14) * (1 - Math.max(0, (u - 0.82) / 0.18)) * 0.7);
+    }
+    // White-hot throat of the jet
+    for (let j = 0; j < 4; j++) { const u = j * 0.05; puff(fire[1], at(u, 0, 0), w * (0.45 + u * 2), k * 0.9); }
+    puff(fire[2], at(0, 0, 0), w * 1.4, k * 0.7);
+    // Fire splashing round the target once the stream reaches it
+    if (front >= 0.98) {
+      for (let j = 0; j < 12; j++) {
+        const v = (ts / 420 + j / 12) % 1, ang = Math.atan2(-uy, -ux) + (hash(j + 60) - 0.5) * 3.4;
+        const p = { x: x1 + Math.cos(ang) * v * w * 2.6, y: y1 + Math.sin(ang) * v * w * 2.2 - v * w * 1.4 };
+        puff(fire[Math.min(7, 2 + Math.floor(v * 5))], p, w * (0.6 + v * 1.1), k * (1 - v) * 0.8);
+      }
+    }
+    // Sparks spitting off the sides
+    ctx.globalAlpha = 1; ctx.lineCap = 'round';
+    for (let j = 0; j < 12; j++) {
+      const u = (ts / 380 + j / 12 + hash(j + 90) * 0.2) % 1;
+      if (u > front) continue;
+      const p = at(u * 1.1, (hash(j + 70) - 0.5) * w * 3.6 * u, u * u * 16);
+      ctx.strokeStyle = `rgba(255,${190 + Math.round(hash(j + 80) * 60)},120,${k * (1 - u)})`; ctx.lineWidth = 1.1;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - ux * 5, p.y - uy * 5 + 1); ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
     ctx.restore();
   }
 
-  // Rider and bike on fire: flame tongues streaming back opposite to the
-  // direction of travel from the bike, the rider and his helmet, a hot glow,
-  // and a trail of smoke puffs left in the air (world space).
+  // Rider and bike on fire. Flames lick off the bike, the rider's body and
+  // his helmet — bent back by the rush of air and up by their own heat —
+  // over a hot glow, following the bike through every flip. Burning scraps
+  // shed into the air behind keep flaring and cooling as the bike flies on
+  // ('flame' particles, in world space), with sparks and a trail of smoke.
   drawBurning(x, y, ts) {
-    const ctx = this.ctx, k = Math.min(1, (ts - this.burnT) / 300);
-    const sp = Math.hypot(this.bvx, this.bvy) || 1;
-    const bx = -this.bvx / sp, by = -this.bvy / sp;            // streaming back
-    const dx = bx * 0.75, dy = by * 0.75 - 0.65, dl = Math.hypot(dx, dy) || 1;
+    const ctx = this.ctx, k = Math.min(1, (ts - this.burnT) / 300), { fire } = this.fireSprites();
+    const a = this._bikeAng || 0, c = Math.cos(a), s = Math.sin(a), S = BIKE_SCALE;
+    const rc = this._riderC || { x: -2, y: -14 };
+    const pts = [[-9, 2, 1], [3, 0, 1.1], [13, -2, 0.8], [-16, 7, 0.75], [rc.x, rc.y + 3, 1.15], [rc.x + 2, rc.y - 5, 1], [rc.x + 4, rc.y - 13, 0.85]]
+      .map(([px, py, sz]) => ({ x: (px * c - py * s) * S, y: (px * s + py * c) * S, sz }));
+    const sp = Math.hypot(this.bvx, this.bvy) || 1, bx = -this.bvx / sp, by = -this.bvy / sp;
+    const dx = bx * 0.8, dy = by * 0.8 - 0.75, dl = Math.hypot(dx, dy) || 1;
     const ux = dx / dl, uy = dy / dl, nx = -uy, ny = ux;          // flame direction + its normal
-    ctx.save(); ctx.globalCompositeOperation = 'lighter';
-    const glow = ctx.createRadialGradient(x, y - 26, 0, x, y - 26, 70);
-    glow.addColorStop(0, `rgba(255,140,50,${0.45 * k})`); glow.addColorStop(1, 'rgba(255,90,30,0)');
-    ctx.fillStyle = glow; ctx.fillRect(x - 70, y - 96, 140, 140);
-    [[-22, -14, 1.1], [-8, -24, 1.25], [-2, -40, 1.05], [6, -52, 0.85], [16, -8, 0.8], [-30, -4, 0.7]].forEach(([ox, oy, s], i) => {
-      const flick = 0.75 + Math.sin(ts * 0.03 + i * 1.9) * 0.25, len = (18 + i % 3 * 5) * s * flick * k, w = 6.5 * s * k;
-      const sx = x + ox, sy = y + oy;
-      [[1, '255,70,24', 0.8], [0.64, '255,160,52', 0.9], [0.32, '255,244,200', 0.95]].forEach(([f, rgb, a]) => {
-        const L = len * (0.6 + f * 0.4), W2 = w * f;
-        const tipX = sx + ux * L + nx * Math.sin(ts * 0.025 + i) * 3, tipY = sy + uy * L + ny * Math.sin(ts * 0.025 + i) * 3;
-        ctx.fillStyle = `rgba(${rgb},${a * k})`;
-        ctx.beginPath();
-        ctx.moveTo(sx + nx * W2, sy + ny * W2);
-        ctx.quadraticCurveTo(sx + ux * L * 0.5 + nx * W2 * 1.1, sy + uy * L * 0.5 + ny * W2 * 1.1, tipX, tipY);
-        ctx.quadraticCurveTo(sx + ux * L * 0.5 - nx * W2 * 1.1, sy + uy * L * 0.5 - ny * W2 * 1.1, sx - nx * W2, sy - ny * W2);
-        ctx.closePath(); ctx.fill();
+
+    if (this.phase === 'flying') {
+      for (let i = 0; i < (this.lowPower ? 3 : 5); i++) {
+        const p = pts[(Math.random() * pts.length) | 0];
+        this.particles.push({ type: 'flame', x: this.bx + p.x + (Math.random() - 0.5) * 6, y: y + p.y + (Math.random() - 0.5) * 6,
+          vx: this.bvx * 0.62 + (Math.random() - 0.5) * 0.7, vy: this.bvy * 0.5 - 0.8 - Math.random() * 0.7,
+          life: 1, decay: 0.045 + Math.random() * 0.035, r: (7 + Math.random() * 6) * p.sz, rot: 0, spin: 0 });
+      }
+      if (Math.random() < 0.35) {
+        const p = pts[(Math.random() * pts.length) | 0];
+        this.particles.push({ type: 'ember', x: this.bx + p.x, y: y + p.y, vx: this.bvx * 0.6 + (Math.random() - 0.5) * 2, vy: this.bvy * 0.5 - 1 - Math.random() * 2,
+          life: 1, decay: 0.03 + Math.random() * 0.03, r: 0.9 + Math.random() * 1.2, rot: 0, spin: 0, col: Math.random() < 0.5 ? '255,214,120' : '255,150,60' });
+      }
+      if (Math.random() < 0.7) {
+        this.particles.push({ type: 'smoke', x: this.bx - 6 + Math.random() * 12, y: y - 30 + Math.random() * 20, vx: bx * 1.2 + this.bvx * 0.3, vy: -0.6 - Math.random() * 0.5,
+          life: 1, decay: 0.011, r: 6 + Math.random() * 5, rot: 0, spin: 0 });
+      }
+    }
+
+    // A flame tongue from (bx0, by0): wide at the root, licking out along
+    // the flame direction to a swaying tip; `f` shrinks it for inner layers
+    const tongue = (bx0, by0, len, w, sway, f) => {
+      const L = len * (0.45 + f * 0.55), W = w * f, sw = sway * f;
+      const tipX = bx0 + ux * L + nx * sw, tipY = by0 + uy * L + ny * sw;
+      ctx.beginPath();
+      ctx.moveTo(bx0 + nx * W, by0 + ny * W);
+      ctx.bezierCurveTo(bx0 + ux * L * 0.35 + nx * W * 1.35, by0 + uy * L * 0.35 + ny * W * 1.35,
+        bx0 + ux * L * 0.72 + nx * (W * 0.35 + sw * 0.6), by0 + uy * L * 0.72 + ny * (W * 0.35 + sw * 0.6), tipX, tipY);
+      ctx.bezierCurveTo(bx0 + ux * L * 0.72 + nx * (sw * 0.6 - W * 0.3), by0 + uy * L * 0.72 + ny * (sw * 0.6 - W * 0.3),
+        bx0 + ux * L * 0.35 - nx * W * 1.35, by0 + uy * L * 0.35 - ny * W * 1.35, bx0 - nx * W, by0 - ny * W);
+      ctx.quadraticCurveTo(bx0 - ux * W * 0.9, by0 - uy * W * 0.9, bx0 + nx * W, by0 + ny * W);
+      ctx.closePath();
+    };
+    ctx.save();
+    const mx = pts.reduce((t, p) => t + p.x, 0) / pts.length, my = pts.reduce((t, p) => t + p.y, 0) / pts.length;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.28 * k; ctx.drawImage(fire[4], x + mx - 70, y + my - 70, 140, 140);
+    ctx.globalCompositeOperation = 'source-over';
+    const flames = [];
+    pts.forEach((p, i) => {
+      // Two tongues from each spot, out of step, so the fire never repeats
+      for (let t = 0; t < 2; t++) {
+        const ph = ts * (0.029 + t * 0.011) + i * 1.9 + t * 2.6;
+        const flick = 0.72 + 0.28 * Math.sin(ph) * Math.sin(ph * 0.53 + 1);
+        const w = (4.5 - t * 1.2) * p.sz * k, ox = (t ? -1 : 1) * w * 0.45;
+        flames.push({ bx0: x + p.x + nx * ox, by0: y + p.y + ny * ox, len: (26 + (i % 3) * 7 - t * 6) * p.sz * flick * k, w,
+          sway: Math.sin(ts * 0.022 + i * 2.3 + t * 1.4) * 4 * p.sz });
+      }
+    });
+    // Layered like real flame: deep red-orange outside, orange, then a
+    // yellow heart and a white-hot root that glow
+    [[1, 'rgba(214,52,22,', 'rgba(255,120,36,', 0.88], [0.68, 'rgba(255,128,34,', 'rgba(255,196,80,', 0.92]].forEach(([f, c0, c1, a]) => {
+      flames.forEach((q) => {
+        const g = ctx.createLinearGradient(q.bx0, q.by0, q.bx0 + ux * q.len * f, q.by0 + uy * q.len * f);
+        g.addColorStop(0, `${c1}${a * k})`); g.addColorStop(0.55, `${c0}${a * k})`); g.addColorStop(1, `${c0}0)`);
+        ctx.fillStyle = g; tongue(q.bx0, q.by0, q.len, q.w, q.sway, f); ctx.fill();
       });
     });
+    ctx.globalCompositeOperation = 'lighter';
+    flames.forEach((q) => {
+      const g = ctx.createLinearGradient(q.bx0, q.by0, q.bx0 + ux * q.len * 0.4, q.by0 + uy * q.len * 0.4);
+      g.addColorStop(0, `rgba(255,250,220,${0.95 * k})`); g.addColorStop(0.6, `rgba(255,220,120,${0.6 * k})`); g.addColorStop(1, 'rgba(255,200,100,0)');
+      ctx.fillStyle = g; tongue(q.bx0, q.by0, q.len, q.w, q.sway, 0.4); ctx.fill();
+    });
+    pts.forEach((p) => {
+      const r = 5 * p.sz;
+      ctx.globalAlpha = 0.6 * k; ctx.drawImage(fire[1], x + p.x - r, y + p.y - r, r * 2, r * 2);
+    });
     ctx.restore();
-    // Smoke left hanging in the air behind the burning bike
-    if (Math.random() < 0.6) {
-      this.particles.push({ type: 'smoke', x: this.bx - 10 + Math.random() * 16, y: y - 30 + Math.random() * 20, vx: bx * 1.2, vy: -0.6 - Math.random() * 0.5, life: 1, decay: 0.012, r: 5 + Math.random() * 4, rot: 0, spin: 0 });
-    }
   }
 
   // A distant gull seen from below: a slim body and two long wings bent at
@@ -1292,53 +1492,134 @@ export class BikeGame {
     ctx.restore();
   }
 
-  // A side-on gull flying right: a streamlined body cool-lit by the moon on
-  // top and warm-lit by the stadium underneath, white tail, yellow bill with
-  // its red spot, and long wings that bend at the wrist — the hand trailing
-  // the arm through every beat — ending in black, white-spotted tips.
+  // A side-on gull flying right. Long wings bend at the wrist — the hand
+  // trailing the arm through every beat — each built from feathers: soft
+  // grey coverts, a row of secondaries with the white trailing edge gulls
+  // have, and five fingered black primaries with white "mirror" spots that
+  // fan apart on the downstroke. A streamlined body, grey on the back and
+  // white below, warm-lit by the stadium underneath and rimmed by the moon
+  // on top; a white head with a dark glinting eye, a yellow bill with its
+  // red spot, a white tail and pink feet tucked up.
   drawGull(x, y, size, phase) {
     const ctx = this.ctx;
     const cyc = phase % (Math.PI * 6);
     const glide = cyc >= Math.PI * 4;
     const fa = glide ? 0.16 : Math.sin(cyc), fh = glide ? 0.08 : Math.sin(cyc - 0.65);
+    const spread = glide ? 0.55 : 0.35 + 0.65 * Math.max(0, -Math.cos(cyc)); // primaries fan apart on the downstroke
     ctx.save(); ctx.translate(x, y); ctx.scale(size, size);
-    const wing = (k, ox, oy, fill) => {
-      const wr = { x: -0.02 + ox, y: -0.1 + oy - 0.56 * fa * k };
-      const tip = { x: -0.5 + ox + 0.1 * Math.abs(fh), y: wr.y - 0.62 * fh * k - 0.03 };
-      const path = () => {
-        ctx.beginPath();
-        ctx.moveTo(0.18 + ox, -0.1 + oy);
-        ctx.quadraticCurveTo(0.12 + ox, (wr.y - 0.1 + oy) / 2 - 0.05, wr.x, wr.y);
-        ctx.quadraticCurveTo((wr.x + tip.x) / 2, (wr.y + tip.y) / 2 - 0.03, tip.x, tip.y);
-        ctx.quadraticCurveTo(wr.x - 0.17, wr.y + 0.03, wr.x - 0.27, wr.y + 0.07);
-        ctx.quadraticCurveTo(-0.25 + ox, (wr.y + oy) / 2, -0.3 + ox, -0.01 + oy);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+    const wing = (k, ox, oy, near) => {
+      const S = { x: 0.16 + ox, y: -0.1 + oy };
+      const Wr = { x: -0.04 + ox, y: -0.1 + oy - 0.56 * fa * k };
+      const T = { x: -0.52 + ox + 0.1 * Math.abs(fh), y: Wr.y - 0.64 * fh * k - 0.03 };
+      const R = { x: -0.34 + ox, y: 0.0 + oy };
+      const hx = T.x - Wr.x, hy = T.y - Wr.y, hl = Math.hypot(hx, hy) || 1, hux = hx / hl, huy = hy / hl;
+      const sgn = -huy < 0 ? 1 : -1, bk = { x: -huy * sgn, y: hux * sgn }; // across the hand, toward the trailing side
+      const P5 = { x: Wr.x + bk.x * 0.11 - 0.03, y: Wr.y + bk.y * 0.11 + 0.02 };
+      const outline = () => {
+        ctx.beginPath(); ctx.moveTo(S.x, S.y);
+        ctx.quadraticCurveTo(0.12 + ox, (Wr.y - 0.1 + oy) / 2 - 0.05, Wr.x, Wr.y);
+        ctx.quadraticCurveTo((Wr.x + T.x) / 2, (Wr.y + T.y) / 2 - 0.03, T.x, T.y);
+        ctx.quadraticCurveTo((T.x + P5.x) / 2 + bk.x * 0.07, (T.y + P5.y) / 2 + bk.y * 0.07, P5.x, P5.y);
+        // Secondaries: a row of rounded feather tips back to the body
+        for (let j = 1; j <= 5; j++) {
+          const t0 = (j - 1) / 5, t1 = j / 5;
+          const ax = P5.x + (R.x - P5.x) * t0, ay = P5.y + (R.y - P5.y) * t0, cx2 = P5.x + (R.x - P5.x) * t1, cy2 = P5.y + (R.y - P5.y) * t1;
+          ctx.quadraticCurveTo((ax + cx2) / 2 + bk.x * 0.05, (ay + cy2) / 2 + bk.y * 0.05 + 0.02, cx2, cy2);
+        }
+        ctx.quadraticCurveTo(-0.2 + ox, -0.04 + oy, S.x, S.y);
         ctx.closePath();
       };
-      path(); ctx.fillStyle = fill; ctx.fill();
-      ctx.save(); path(); ctx.clip();
-      ctx.fillStyle = '#12151C';
-      ctx.beginPath(); ctx.arc(tip.x, tip.y, 0.3, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = 'rgba(240,244,250,0.92)';
-      ctx.beginPath(); ctx.arc(tip.x + 0.09, tip.y + (wr.y - tip.y) * 0.16, 0.035, 0, Math.PI * 2); ctx.fill();
+      const g = ctx.createLinearGradient(0, Math.min(T.y, Wr.y), 0, 0.05);
+      g.addColorStop(0, near ? '#B8C3D4' : '#5E6B82'); g.addColorStop(1, near ? '#8796AE' : '#465269');
+      outline(); ctx.fillStyle = g; ctx.fill();
+      ctx.save(); outline(); ctx.clip();
+      // The hand darkens to black toward the tip; a line marks the coverts
+      const M = { x: Wr.x + hx * 0.5, y: Wr.y + hy * 0.5 }, E2 = { x: T.x + hx * 0.3, y: T.y + hy * 0.3 };
+      ctx.fillStyle = near ? '#171A22' : '#0C0E13';
+      ctx.beginPath();
+      ctx.moveTo(M.x - bk.x * 0.3, M.y - bk.y * 0.3); ctx.lineTo(M.x + bk.x * 0.5, M.y + bk.y * 0.5);
+      ctx.lineTo(E2.x + bk.x * 0.5, E2.y + bk.y * 0.5); ctx.lineTo(E2.x - bk.x * 0.3, E2.y - bk.y * 0.3); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = near ? 'rgba(60,70,90,0.45)' : 'rgba(10,14,22,0.5)'; ctx.lineWidth = 0.012;
+      ctx.beginPath(); ctx.moveTo(S.x - 0.02, S.y + 0.03); ctx.quadraticCurveTo((S.x + Wr.x) / 2 - 0.08, (S.y + Wr.y) / 2 + 0.06, Wr.x - 0.07, Wr.y + 0.05); ctx.stroke();
       ctx.restore();
+      // Primaries: five long pointed black feathers that carry the wingtip
+      // on past the hand, the inner ones swinging back as they fan apart on
+      // the downstroke, the outer two with white mirror spots
+      for (let j = 4; j >= 0; j--) {
+        const t = j / 4, base = { x: Wr.x + hx * (1 - t * 0.5), y: Wr.y + hy * (1 - t * 0.5) };
+        const a = sgn * (0.08 + t * (0.32 + spread * 0.42)), c = Math.cos(a), s = Math.sin(a);
+        const dx = hux * c - huy * s, dy = hux * s + huy * c, len = 0.27 - t * 0.07, w = 0.036 - t * 0.004, px = -dy, py = dx;
+        const tip = { x: base.x + dx * len, y: base.y + dy * len };
+        ctx.beginPath();
+        ctx.moveTo(base.x + px * w, base.y + py * w);
+        ctx.quadraticCurveTo(base.x + dx * len * 0.6 + px * w * 1.15, base.y + dy * len * 0.6 + py * w * 1.15, tip.x, tip.y);
+        ctx.quadraticCurveTo(base.x + dx * len * 0.6 - px * w * 1.15, base.y + dy * len * 0.6 - py * w * 1.15, base.x - px * w, base.y - py * w);
+        ctx.closePath();
+        ctx.fillStyle = near ? '#171A22' : '#0C0E13'; ctx.fill();
+        ctx.strokeStyle = near ? 'rgba(110,120,140,0.55)' : 'rgba(40,46,60,0.6)'; ctx.lineWidth = 0.008; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(base.x + dx * len * 0.85, base.y + dy * len * 0.85); ctx.stroke();
+        if (j < 2) {
+          ctx.fillStyle = near ? 'rgba(244,247,252,0.95)' : 'rgba(200,208,222,0.6)';
+          ctx.beginPath(); ctx.ellipse(base.x + dx * len * 0.74, base.y + dy * len * 0.74, 0.03, 0.018, Math.atan2(dy, dx), 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      // White trailing edge along the secondaries
+      ctx.strokeStyle = near ? 'rgba(246,248,252,0.9)' : 'rgba(170,180,198,0.5)'; ctx.lineWidth = 0.028;
+      ctx.beginPath(); ctx.moveTo(P5.x, P5.y);
+      for (let j = 1; j <= 5; j++) {
+        const t0 = (j - 1) / 5, t1 = j / 5;
+        const ax = P5.x + (R.x - P5.x) * t0, ay = P5.y + (R.y - P5.y) * t0, cx2 = P5.x + (R.x - P5.x) * t1, cy2 = P5.y + (R.y - P5.y) * t1;
+        ctx.quadraticCurveTo((ax + cx2) / 2 + bk.x * 0.05, (ay + cy2) / 2 + bk.y * 0.05 + 0.02, cx2, cy2);
+      }
+      ctx.stroke();
+      if (near) {
+        ctx.strokeStyle = 'rgba(226,236,255,0.7)'; ctx.lineWidth = 0.02;
+        ctx.beginPath(); ctx.moveTo(S.x, S.y - 0.01); ctx.quadraticCurveTo(0.12 + ox, (Wr.y - 0.1 + oy) / 2 - 0.06, Wr.x, Wr.y - 0.01); ctx.stroke();
+      }
     };
-    wing(0.8, 0.05, -0.03, '#47546A');
-    const body = ctx.createLinearGradient(0, -0.2, 0, 0.17);
-    body.addColorStop(0, '#9DACC5'); body.addColorStop(0.45, '#DCDCD8'); body.addColorStop(1, '#F2D9B0');
-    ctx.fillStyle = body;
-    ctx.beginPath();
-    ctx.moveTo(-0.62, 0.02);
-    ctx.quadraticCurveTo(-0.3, -0.17, 0.3, -0.14);
-    ctx.quadraticCurveTo(0.6, -0.25, 0.74, -0.08);
-    ctx.quadraticCurveTo(0.72, 0.02, 0.5, 0.04);
-    ctx.quadraticCurveTo(0, 0.17, -0.62, 0.02);
-    ctx.closePath(); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(-0.55, -0.03); ctx.lineTo(-0.86, -0.08); ctx.lineTo(-0.84, 0.06); ctx.lineTo(-0.55, 0.06); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#E8C24A';
-    ctx.beginPath(); ctx.moveTo(0.72, -0.1); ctx.lineTo(0.95, -0.065); ctx.lineTo(0.72, -0.03); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#D9483A'; ctx.beginPath(); ctx.arc(0.87, -0.06, 0.018, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#0B0E14'; ctx.beginPath(); ctx.arc(0.62, -0.11, 0.03, 0, Math.PI * 2); ctx.fill();
-    wing(1, 0, 0, '#7A889F');
+    wing(0.8, 0.05, -0.03, false);
+
+    // Tail, then the body over it
+    ctx.fillStyle = '#E9ECF1';
+    ctx.beginPath(); ctx.moveTo(-0.5, -0.04); ctx.lineTo(-0.86, -0.1); ctx.quadraticCurveTo(-0.9, -0.01, -0.85, 0.07); ctx.lineTo(-0.5, 0.07); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,130,150,0.6)'; ctx.lineWidth = 0.012;
+    ctx.beginPath(); ctx.moveTo(-0.84, -0.06); ctx.lineTo(-0.6, -0.01); ctx.moveTo(-0.85, 0.03); ctx.lineTo(-0.6, 0.03); ctx.stroke();
+    const bodyPath = () => {
+      ctx.beginPath(); ctx.moveTo(-0.62, 0.02);
+      ctx.quadraticCurveTo(-0.3, -0.17, 0.3, -0.15);
+      ctx.quadraticCurveTo(0.52, -0.27, 0.7, -0.15);
+      ctx.quadraticCurveTo(0.76, -0.06, 0.66, 0.0);
+      ctx.quadraticCurveTo(0.5, 0.06, 0.3, 0.09);
+      ctx.quadraticCurveTo(-0.1, 0.18, -0.62, 0.02);
+      ctx.closePath();
+    };
+    const body = ctx.createLinearGradient(0, -0.24, 0, 0.17);
+    body.addColorStop(0, '#F4F6FA'); body.addColorStop(0.55, '#E6E8EC'); body.addColorStop(1, '#F2D7AE');
+    bodyPath(); ctx.fillStyle = body; ctx.fill();
+    // Grey mantle across the back
+    ctx.save(); bodyPath(); ctx.clip();
+    ctx.fillStyle = '#9AA7BC';
+    ctx.beginPath(); ctx.moveTo(-0.66, -0.02); ctx.quadraticCurveTo(-0.2, -0.2, 0.32, -0.15); ctx.lineTo(0.3, -0.07); ctx.quadraticCurveTo(-0.15, -0.05, -0.66, 0.03); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(210,226,255,0.8)'; ctx.lineWidth = 0.018;
+    ctx.beginPath(); ctx.moveTo(-0.5, -0.06); ctx.quadraticCurveTo(-0.2, -0.17, 0.3, -0.155); ctx.quadraticCurveTo(0.5, -0.27, 0.68, -0.17); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,190,120,0.45)'; ctx.lineWidth = 0.02;
+    ctx.beginPath(); ctx.moveTo(-0.4, 0.08); ctx.quadraticCurveTo(0, 0.16, 0.4, 0.07); ctx.stroke();
+    // Feet tucked up under the tail
+    ctx.strokeStyle = '#E39A86'; ctx.lineWidth = 0.03;
+    ctx.beginPath(); ctx.moveTo(-0.24, 0.12); ctx.lineTo(-0.42, 0.11); ctx.stroke();
+    // Bill with its red spot, and a dark eye with a glint
+    ctx.fillStyle = '#F0C845';
+    ctx.beginPath(); ctx.moveTo(0.7, -0.12); ctx.quadraticCurveTo(0.84, -0.12, 0.97, -0.085); ctx.quadraticCurveTo(0.93, -0.05, 0.86, -0.055); ctx.lineTo(0.7, -0.05); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#D9483A'; ctx.beginPath(); ctx.arc(0.885, -0.066, 0.016, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,90,20,0.6)'; ctx.lineWidth = 0.008; ctx.beginPath(); ctx.moveTo(0.72, -0.085); ctx.lineTo(0.92, -0.08); ctx.stroke();
+    ctx.fillStyle = '#0B0E14'; ctx.beginPath(); ctx.arc(0.6, -0.15, 0.03, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFFFFF'; ctx.beginPath(); ctx.arc(0.608, -0.158, 0.01, 0, Math.PI * 2); ctx.fill();
+
+    wing(1, 0, 0, true);
+    ctx.lineJoin = 'miter'; ctx.lineCap = 'butt';
     ctx.restore();
   }
 
@@ -1403,6 +1684,11 @@ export class BikeGame {
     ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.beginPath(); ctx.arc(0.508, -0.17, 0.01, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#D8CBB0';
     ctx.beginPath(); ctx.moveTo(0.55, -0.12); ctx.quadraticCurveTo(0.6, -0.1, 0.56, -0.06); ctx.closePath(); ctx.fill();
+    // Talons tucked up under the body
+    ctx.strokeStyle = '#3A2A1A'; ctx.lineWidth = 0.022; ctx.lineCap = 'round';
+    ctx.beginPath();
+    [0, 0.05].forEach((o) => { ctx.moveTo(-0.08 + o, 0.17); ctx.quadraticCurveTo(-0.14 + o, 0.22, -0.19 + o, 0.19); });
+    ctx.stroke(); ctx.lineCap = 'butt';
     const wg = ctx.createLinearGradient(near.wr.x + 0.1, 0, near.te.x, 0);
     wg.addColorStop(0, '#D8B276'); wg.addColorStop(1, '#F1E6D0');
     wingPath(near); ctx.fillStyle = wg; ctx.fill();
@@ -1412,6 +1698,15 @@ export class BikeGame {
       const t = 0.2 + i * 0.16;
       const px = near.tip.x + (near.wr.x - near.tip.x) * t, py = near.tip.y + (near.wr.y - near.tip.y) * t;
       ctx.beginPath(); ctx.moveTo(px + 0.06, py - 0.02); ctx.lineTo(px - 0.3, py + 0.05); ctx.stroke();
+    }
+    // Darker fingertips and fine pale speckles over the coverts
+    ctx.fillStyle = 'rgba(110,76,40,0.45)';
+    ctx.beginPath(); ctx.arc(near.tip.x - 0.04, near.tip.y + 0.04, 0.13, 0, Math.PI * 2); ctx.fill();
+    for (let i = 0; i < 7; i++) {
+      const t = 0.15 + (i % 4) * 0.2, side = Math.floor(i / 4) * 0.08;
+      const px = near.wr.x + (near.tip.x - near.wr.x) * t * 0.6 - 0.06 - side, py = near.wr.y + (near.tip.y - near.wr.y) * t * 0.6 + 0.04 + side * 0.4;
+      ctx.fillStyle = 'rgba(70,46,24,0.55)'; ctx.beginPath(); ctx.arc(px, py, 0.016, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,250,240,0.9)'; ctx.beginPath(); ctx.arc(px - 0.004, py - 0.004, 0.009, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
     // Backlit by the moon: a dark silhouette with a thin bright rim
@@ -1427,166 +1722,319 @@ export class BikeGame {
     ctx.restore();
   }
 
-  // A red dragon, drawn facing right (`facing` -1 mirrors it): a horned head
-  // with a glowing eye, a long neck, a whip of a tail ending in a spade, a
-  // golden belly, and bat wings — finger bones fanning out under a
-  // scalloped, veined membrane running from blood red to ember orange —
-  // beating slow and deep, the outer wing lagging the arm. Its body lifts on
-  // each downstroke while the neck and tail ripple; moonlight rims its back.
-  // On patrol (`idleBreath`) it breathes a short burst of fire every few
-  // seconds; when it attacks the rider the aimed jet is drawn separately.
-  drawDragon(x, y, scale, phase, ts, facing = 1, idleBreath = true) {
-    const ctx = this.ctx;
-    const f = Math.sin(phase), fl = Math.sin(phase - 0.6);
-    const BODY = '#8A161B', BONE = '#3A0709', RIM = 'rgba(255,224,206,0.55)';
-    const ft = (ts % 7000) / 7000, breath = idleBreath && ft < 0.18 ? Math.sin((ft / 0.18) * Math.PI) : 0;
+  // A red dragon, drawn facing right (`facing` -1 mirrors it), about 85
+  // units from spade to snout. A horned head with a glowing slit eye sits on
+  // an S-curved neck that can dip toward a target (`pose.tilt`), with a jaw
+  // that drops open (`pose.jaw`) on a fanged, dark mouth. A scaled crimson
+  // body with gold belly plates, spines running crown to tail, clawed legs
+  // tucked up, and a long whip of a tail ending in a spade. Bat wings: arm
+  // and finger bones fanning under a membrane that runs from deep crimson
+  // at the bones to backlit ember-orange at the scalloped trailing edge,
+  // veined and creased along each finger, beating slow and deep with the
+  // hand lagging the arm; the far wing sits in shadow. Moonlight rims its
+  // back, and when it's about to breathe fire (`pose.glow`) its throat and
+  // chest glow from inside.
+  drawDragon(x, y, scale, phase, ts, facing = 1, pose = {}) {
+    const ctx = this.ctx, { fire } = this.fireSprites();
+    const tilt = pose.tilt || 0, jaw = pose.jaw || 0, inner = pose.glow || 0;
+    const f = Math.sin(phase), fl = Math.sin(phase - 0.7);
+    const BONE = '#EEDFC6', BONE_D = '#7C6654', INK = 'rgba(30,2,6,0.7)', GOLD0 = '#F6BD62', GOLD1 = '#C0602A';
     ctx.save(); ctx.translate(x, y + f * 2.4); ctx.scale(scale * facing, scale);
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-
-    const wing = (sx, sy, k, membrane, rim) => {
-      const elbow = { x: sx - 5, y: sy - 9 * f * k - 1.5 };
-      const wrist = { x: sx + 3, y: sy - 19 * f * k - 2.5 };
-      const tips = [
-        { x: wrist.x + 9, y: wrist.y - 9 * fl * k - 3 },
-        { x: wrist.x - 7, y: wrist.y - 12 * fl * k - 5 },
-        { x: wrist.x - 19, y: wrist.y - 8 * fl * k - 1.5 },
-        { x: wrist.x - 27, y: wrist.y - 2 * fl * k + 4 },
-      ];
-      const root = { x: sx - 17, y: sy + 2.5 };
-      ctx.beginPath();
-      ctx.moveTo(sx, sy); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.lineTo(tips[0].x, tips[0].y);
-      for (let i = 1; i < tips.length; i++) {
-        const a = tips[i - 1], b = tips[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        ctx.quadraticCurveTo(mx + (wrist.x - mx) * 0.32, my + (wrist.y - my) * 0.32, b.x, b.y);
-      }
-      ctx.quadraticCurveTo((tips[3].x + root.x) / 2 + 2, (tips[3].y + root.y) / 2 - 1.5, root.x, root.y);
+    const skin = (y0, y1) => {
+      const g = ctx.createLinearGradient(0, y0, 0, y1);
+      g.addColorStop(0, '#4A080C'); g.addColorStop(0.5, '#9E1B20'); g.addColorStop(1, '#C9452A');
+      return g;
+    };
+    // A spine at (px, py) pointing along (ax, ay), added to the current path
+    const spike = (px, py, ax, ay, len, w) => {
+      ctx.moveTo(px + ay * w, py - ax * w); ctx.lineTo(px + ax * len, py + ay * len); ctx.lineTo(px - ay * w, py + ax * w); ctx.closePath();
+    };
+    const spikes = (draw) => {
+      ctx.beginPath(); draw();
+      const g = ctx.createLinearGradient(0, -14, 0, 4);
+      g.addColorStop(0, BONE); g.addColorStop(1, BONE_D);
+      ctx.fillStyle = g; ctx.fill();
+      ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+    };
+    // A spine on an edge point of a tube: out from the edge, leaning back
+    const edgeSpike = (q, len, w) => spike(q.x, q.y, q.nx * 0.6 + q.ny * 0.8, q.ny * 0.6 - q.nx * 0.8, len, w);
+    // Outline of a tube of varying width along a list of points: `top` is
+    // the left-hand edge going along the list, `bot` the right-hand one
+    const tube = (pts) => {
+      const side = (sgn) => pts.map((p, i) => {
+        const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+        const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1;
+        return { x: p.x - (dy / L) * p.w * sgn, y: p.y + (dx / L) * p.w * sgn, nx: -dy / L * sgn, ny: dx / L * sgn };
+      });
+      return { top: side(1), bot: side(-1) };
+    };
+    const outline = (top, bot) => {
+      ctx.beginPath(); ctx.moveTo(top[0].x, top[0].y);
+      for (let i = 1; i < top.length; i++) ctx.lineTo(top[i].x, top[i].y);
+      for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i].x, bot[i].y);
       ctx.closePath();
-      // Membrane: dense near the body, thinning (and lighter) toward the edge
-      const mg = ctx.createRadialGradient(sx, sy, 2, sx, sy, 34);
-      mg.addColorStop(0, membrane[0]); mg.addColorStop(1, membrane[1]);
-      ctx.fillStyle = mg; ctx.fill();
-      // Veins branching through the membrane between the fingers
-      ctx.strokeStyle = 'rgba(30,8,16,0.38)'; ctx.lineWidth = 0.4; ctx.beginPath();
-      for (let i = 1; i < tips.length; i++) {
-        const a = tips[i - 1], b = tips[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-        ctx.moveTo(wrist.x + (mx - wrist.x) * 0.25, wrist.y + (my - wrist.y) * 0.25);
-        ctx.quadraticCurveTo(wrist.x + (mx - wrist.x) * 0.6 + 1, wrist.y + (my - wrist.y) * 0.6, mx + (wrist.x - mx) * 0.34, my + (wrist.y - my) * 0.34);
-      }
-      ctx.stroke();
-      ctx.strokeStyle = BONE; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
-      ctx.lineWidth = 0.8; ctx.beginPath();
-      tips.forEach((t) => { ctx.moveTo(wrist.x, wrist.y); ctx.lineTo(t.x, t.y); });
-      ctx.stroke();
-      ctx.fillStyle = '#D9CBB8';
-      ctx.beginPath(); ctx.moveTo(wrist.x, wrist.y); ctx.lineTo(wrist.x + 2.6, wrist.y - 1.2); ctx.lineTo(wrist.x + 0.6, wrist.y + 0.8); ctx.closePath();
-      tips.forEach((t) => { ctx.moveTo(t.x, t.y); ctx.lineTo(t.x - 1.4, t.y - 0.9); ctx.lineTo(t.x - 0.6, t.y + 0.6); ctx.closePath(); });
-      ctx.fill();
-      if (rim) {
-        ctx.strokeStyle = RIM; ctx.lineWidth = 0.6;
-        ctx.beginPath(); ctx.moveTo(sx, sy - 0.6); ctx.lineTo(elbow.x, elbow.y - 0.6); ctx.lineTo(wrist.x, wrist.y - 0.6); ctx.lineTo(tips[0].x, tips[0].y); ctx.stroke();
-      }
     };
 
-    wing(4, -3, 0.85, ['rgba(92,10,16,0.96)', 'rgba(150,34,26,0.88)'], false);
-
-    // Tail: tapering from the hips to a spade, swaying through each beat
-    const tail = [];
-    for (let i = 0; i <= 12; i++) {
-      const t = i / 12;
-      tail.push({ x: -9 - t * 27, y: 1.5 + t * 3 + Math.sin(t * 3.2 + phase * 0.5) * 3.2 * t, w: 3.3 * (1 - t) + 0.45 });
-    }
-    ctx.fillStyle = BODY; ctx.beginPath();
-    tail.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y - p.w) : ctx.moveTo(p.x, p.y - p.w)));
-    for (let i = tail.length - 1; i >= 0; i--) ctx.lineTo(tail[i].x, tail[i].y + tail[i].w);
-    ctx.closePath(); ctx.fill();
-    const tip = tail[12];
-    ctx.beginPath(); ctx.moveTo(tip.x + 1, tip.y); ctx.lineTo(tip.x - 3.2, tip.y - 3.4); ctx.lineTo(tip.x - 7, tip.y); ctx.lineTo(tip.x - 3.2, tip.y + 3.4); ctx.closePath(); ctx.fill();
-
-    // Body, with a paler scaled belly and a tucked hind leg
-    const bg = ctx.createLinearGradient(0, -6, 0, 6);
-    bg.addColorStop(0, '#5C0C10'); bg.addColorStop(0.55, '#A11D21'); bg.addColorStop(1, '#E88A3C');
-    ctx.fillStyle = bg; ctx.beginPath(); ctx.ellipse(-1, 0.6, 11.5, 5.4, -0.04, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,200,130,0.6)'; ctx.lineWidth = 0.5; ctx.beginPath();
-    for (let k = 0; k < 6; k++) { const bx = -7 + k * 3; ctx.moveTo(bx, 4.4); ctx.quadraticCurveTo(bx + 1.5, 6, bx + 3, 4.4); }
-    ctx.stroke();
-    ctx.fillStyle = BODY;
-    ctx.beginPath(); ctx.moveTo(-7, 3); ctx.quadraticCurveTo(-9, 8, -5, 9.5); ctx.lineTo(-3, 9); ctx.quadraticCurveTo(-5, 6, -3.5, 3.5); ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = '#D9CBB8'; ctx.lineWidth = 0.6;
-    ctx.beginPath(); ctx.moveTo(-5, 9.5); ctx.lineTo(-3.8, 11); ctx.moveTo(-3.8, 9.3); ctx.lineTo(-2.4, 10.6); ctx.stroke();
-    // The stadium's glow warming the underside
-    ctx.strokeStyle = 'rgba(255,170,96,0.35)'; ctx.lineWidth = 0.9;
-    ctx.beginPath(); ctx.ellipse(-1, 0.6, 11.5, 5.4, -0.04, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
-
-    // Neck and head ripple gently through the flight
-    ctx.save();
-    ctx.translate(6, -4); ctx.rotate(Math.sin(phase * 0.5 + 1) * 0.07); ctx.translate(-6, 4);
-    // Neck curving up to the head, with spines down its crest
-    ctx.fillStyle = BONE;
-    for (let k = 0; k < 4; k++) { const nx = 8 + k * 2.4, ny = -6.6 - k * 0.8; ctx.beginPath(); ctx.moveTo(nx - 0.9, ny + 0.6); ctx.lineTo(nx - 0.6, ny - 1.6); ctx.lineTo(nx + 0.8, ny + 0.4); ctx.closePath(); ctx.fill(); }
-    ctx.fillStyle = BODY; ctx.beginPath();
-    ctx.moveTo(6, -4); ctx.quadraticCurveTo(12, -9, 17, -8.6); ctx.lineTo(18.5, -4.6); ctx.quadraticCurveTo(13, -4, 9, 3); ctx.closePath(); ctx.fill();
-    // Head: brow ridge, long snout, jaw, swept-back horns and a glowing eye
-    ctx.beginPath();
-    ctx.moveTo(16, -9.4); ctx.quadraticCurveTo(20, -11.2, 23.5, -8.6); ctx.lineTo(29, -6.4); ctx.lineTo(28.6, -4.6);
-    ctx.lineTo(22, -3.6); ctx.quadraticCurveTo(18, -3.2, 16.4, -5); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#5A0A0F';
-    ctx.beginPath(); ctx.moveTo(22, -3.8); ctx.lineTo(28, -4.4); ctx.lineTo(23, -2); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#D9CBB8';
-    [[17.4, -9.6, 11, -14.5], [19.4, -10.2, 14.6, -15.6]].forEach(([hx, hy, ex, ey]) => {
-      ctx.beginPath(); ctx.moveTo(hx - 0.8, hy + 0.5); ctx.quadraticCurveTo((hx + ex) / 2, (hy + ey) / 2 - 0.4, ex, ey); ctx.lineTo(hx + 1, hy + 0.2); ctx.closePath(); ctx.fill();
-    });
-    ctx.save(); ctx.globalCompositeOperation = 'lighter';
-    const eg = ctx.createRadialGradient(22.2, -7.6, 0, 22.2, -7.6, 2.6);
-    eg.addColorStop(0, 'rgba(255,214,110,1)'); eg.addColorStop(0.45, 'rgba(255,140,40,0.75)'); eg.addColorStop(1, 'rgba(255,90,20,0)');
-    ctx.fillStyle = eg; ctx.fillRect(19.6, -10.2, 5.2, 5.2);
-    ctx.restore();
-    ctx.fillStyle = '#FFE9A8'; ctx.beginPath(); ctx.arc(22.2, -7.6, 0.6, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#EDE3D2';
-    ctx.beginPath(); ctx.moveTo(25, -4.3); ctx.lineTo(25.5, -3.2); ctx.lineTo(26, -4.4); ctx.moveTo(27, -4.6); ctx.lineTo(27.4, -3.7); ctx.lineTo(27.8, -4.7); ctx.fill();
-
-    // Fire breath: a jet every seven seconds that lights up the head, then
-    // a wisp of smoke from the nostrils
-    if (breath > 0) {
-      const len = 34 * breath, wob = Math.sin(ts * 0.05) * 2;
-      ctx.save(); ctx.globalCompositeOperation = 'lighter';
-      const glow = ctx.createRadialGradient(28, -6, 0, 28, -6, 17);
-      glow.addColorStop(0, `rgba(255,170,70,${0.55 * breath})`); glow.addColorStop(1, 'rgba(255,100,30,0)');
-      ctx.fillStyle = glow; ctx.fillRect(11, -23, 34, 34);
-      const cone = (w, c0, c1, reach) => {
-        const L = len * reach, cg = ctx.createLinearGradient(29, -5, 29 + L, -3);
-        cg.addColorStop(0, c0); cg.addColorStop(1, c1);
-        ctx.fillStyle = cg; ctx.beginPath();
-        ctx.moveTo(29, -5 - w * 0.2);
-        ctx.quadraticCurveTo(29 + L * 0.55, -5 - w - L * 0.1, 29 + L, -4 + wob * reach);
-        ctx.quadraticCurveTo(29 + L * 0.55, -5 + w + L * 0.1, 29, -5 + w * 0.2);
-        ctx.closePath(); ctx.fill();
+    const wing = (sx, sy, k, near) => {
+      const E = { x: sx - 4, y: sy - 10 * f * k - 1.5 };
+      const Wr = { x: sx + 5, y: sy - 21 * f * k - 3 };
+      const tips = [
+        { x: Wr.x + 11, y: Wr.y - 10 * fl * k - 2 },
+        { x: Wr.x - 5, y: Wr.y - 15 * fl * k - 6 },
+        { x: Wr.x - 20, y: Wr.y - 10 * fl * k - 2 },
+        { x: Wr.x - 31, y: Wr.y - 3 * fl * k + 4 },
+      ];
+      const root = { x: sx - 19, y: sy + 5 };
+      // The scalloped trailing edge, finger tip to finger tip and back to the body
+      const trailing = () => {
+        for (let i = 1; i < tips.length; i++) {
+          const a = tips[i - 1], b = tips[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          ctx.quadraticCurveTo(mx + (Wr.x - mx) * 0.34, my + (Wr.y - my) * 0.34, b.x, b.y);
+        }
+        ctx.quadraticCurveTo((tips[3].x + root.x) / 2 + 3, (tips[3].y + root.y) / 2 - 2, root.x, root.y);
       };
-      cone(4.6, `rgba(255,96,32,${0.85 * breath})`, 'rgba(255,60,20,0)', 1);
-      cone(2.8, `rgba(255,192,72,${0.9 * breath})`, 'rgba(255,140,40,0)', 0.8);
-      cone(1.3, `rgba(255,252,224,${breath})`, 'rgba(255,232,160,0)', 0.5);
-      for (let i = 0; i < 6; i++) {
-        const ex = 29 + len * (0.35 + i * 0.12), ey = -4 + Math.sin(ts * 0.03 + i * 2) * (2 + i * 0.6);
-        ctx.fillStyle = `rgba(255,${150 + i * 15},60,${0.75 * breath})`;
-        ctx.beginPath(); ctx.arc(ex, ey, 0.8 + (i % 2) * 0.6, 0, Math.PI * 2); ctx.fill();
+      const edge = () => {
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.lineTo(tips[0].x, tips[0].y);
+        trailing(); ctx.closePath();
+      };
+      const mg = ctx.createRadialGradient(Wr.x, Wr.y, 1, Wr.x, Wr.y, 36);
+      if (near) { mg.addColorStop(0, 'rgba(112,10,18,0.97)'); mg.addColorStop(0.5, 'rgba(172,32,30,0.94)'); mg.addColorStop(1, 'rgba(250,122,58,0.88)'); }
+      else { mg.addColorStop(0, 'rgba(62,5,10,0.97)'); mg.addColorStop(1, 'rgba(132,28,26,0.92)'); }
+      edge(); ctx.fillStyle = mg; ctx.fill();
+      ctx.save(); edge(); ctx.clip();
+      // Creases in the shade of each finger and the arm
+      ctx.strokeStyle = near ? 'rgba(46,0,8,0.38)' : 'rgba(20,0,4,0.4)'; ctx.lineWidth = 2.8; ctx.beginPath();
+      tips.forEach((t) => { ctx.moveTo(Wr.x + 0.8, Wr.y + 1.1); ctx.lineTo(t.x + 0.9, t.y + 1.5); });
+      ctx.moveTo(sx + 0.8, sy + 1.3); ctx.lineTo(E.x + 0.8, E.y + 1.5); ctx.lineTo(Wr.x + 0.8, Wr.y + 1.5);
+      ctx.stroke();
+      // Veins branching out between the fingers
+      ctx.strokeStyle = near ? 'rgba(70,4,14,0.42)' : 'rgba(26,0,6,0.38)'; ctx.lineWidth = 0.35; ctx.beginPath();
+      for (let i = 1; i < tips.length; i++) {
+        const a = tips[i - 1], b = tips[i];
+        for (let v = 1; v <= 2; v++) {
+          const t = v / 3, ex = a.x + (b.x - a.x) * t, ey = a.y + (b.y - a.y) * t;
+          ctx.moveTo(Wr.x + (ex - Wr.x) * 0.18, Wr.y + (ey - Wr.y) * 0.18);
+          ctx.quadraticCurveTo(Wr.x + (ex - Wr.x) * 0.5 + 0.9, Wr.y + (ey - Wr.y) * 0.5 - 0.7, ex + (Wr.x - ex) * 0.34, ey + (Wr.y - ey) * 0.34);
+        }
       }
+      ctx.stroke();
+      // Light shining through the thin membrane along the trailing edge
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.beginPath(); ctx.moveTo(tips[0].x, tips[0].y); trailing();
+      ctx.strokeStyle = near ? 'rgba(255,110,40,0.4)' : 'rgba(200,60,30,0.25)'; ctx.lineWidth = 6; ctx.stroke();
+      ctx.strokeStyle = near ? 'rgba(255,180,96,0.38)' : 'rgba(230,100,50,0.2)'; ctx.lineWidth = 2.2; ctx.stroke();
       ctx.restore();
-    } else if (idleBreath && ft >= 0.18 && ft < 0.32) {
-      const k = (ft - 0.18) / 0.14;
-      for (let i = 0; i < 3; i++) {
-        ctx.fillStyle = `rgba(150,140,150,${0.3 * (1 - k)})`;
-        ctx.beginPath(); ctx.arc(28 + k * 8 + i * 2.5, -7.5 - k * 6 - i * 1.5, 1.4 + k * 3 + i, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = INK; ctx.lineWidth = 0.45; edge(); ctx.stroke();
+      // Bones: a thick arm, then tapering fingers, lit along the top
+      ctx.strokeStyle = near ? '#3C060A' : '#22030A';
+      ctx.lineWidth = 2.2; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.stroke();
+      ctx.lineWidth = 1.05; ctx.beginPath(); tips.forEach((t) => { ctx.moveTo(Wr.x, Wr.y); ctx.lineTo(t.x, t.y); }); ctx.stroke();
+      if (near) {
+        ctx.strokeStyle = 'rgba(255,176,156,0.5)'; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(sx, sy - 0.9); ctx.lineTo(E.x, E.y - 0.9); ctx.lineTo(Wr.x, Wr.y - 0.9); ctx.lineTo(tips[0].x, tips[0].y - 0.4); ctx.stroke();
       }
+      ctx.fillStyle = near ? '#5A0A10' : '#2C040A';
+      ctx.beginPath(); ctx.arc(Wr.x, Wr.y, 1.5, 0, Math.PI * 2); ctx.arc(E.x, E.y, 1.3, 0, Math.PI * 2); ctx.fill();
+      // Claws: a hooked thumb at the wrist and a hook at each finger tip
+      ctx.fillStyle = near ? BONE : BONE_D; ctx.beginPath();
+      ctx.moveTo(Wr.x - 0.6, Wr.y - 0.7); ctx.quadraticCurveTo(Wr.x + 2.8, Wr.y - 2.4, Wr.x + 3.6, Wr.y - 0.3); ctx.lineTo(Wr.x + 0.6, Wr.y + 0.9); ctx.closePath();
+      tips.forEach((t, i) => {
+        const d = i === 0 ? 1 : -1;
+        ctx.moveTo(t.x, t.y - 0.55); ctx.quadraticCurveTo(t.x + d * 1.7, t.y - 1.3, t.x + d * 1.9, t.y + 0.7); ctx.lineTo(t.x, t.y + 0.55); ctx.closePath();
+      });
+      ctx.fill();
+    };
+
+    wing(6, -5.6, 0.85, false);
+
+    // Tail: tapering from the hips into a whip that sways through each beat,
+    // spined along the top and plated underneath, ending in a spade
+    const tail = [];
+    for (let i = 0; i <= 18; i++) {
+      const t = i / 18;
+      tail.push({ x: -11 - t * 40, y: 1.2 + t * 4.5 + Math.sin(t * 3.4 + phase * 0.55) * 3.8 * t, w: 3.4 * Math.pow(1 - t, 0.85) + 0.35 });
     }
+    const tt = tube(tail);
+    outline(tt.top, tt.bot); ctx.fillStyle = skin(-3, 9); ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    for (let i = 0; i < 15; i++) {
+      const b = tt.bot[i], p = tail[i];
+      ctx.strokeStyle = GOLD1; ctx.lineWidth = p.w * 0.55;
+      ctx.beginPath(); ctx.moveTo(b.x + (p.x - b.x) * 0.32, b.y + (p.y - b.y) * 0.32);
+      ctx.lineTo(tt.bot[i + 1].x + (tail[i + 1].x - tt.bot[i + 1].x) * 0.32, tt.bot[i + 1].y + (tail[i + 1].y - tt.bot[i + 1].y) * 0.32); ctx.stroke();
+    }
+    spikes(() => {
+      for (let j = 1; j < 16; j += 2) { const len = 2.3 * (1 - j / 18) + 0.5; edgeSpike(tt.top[j], len, len * 0.42); }
+    });
+    const tp = tail[18], tq = tail[16], ta = Math.atan2(tp.y - tq.y, tp.x - tq.x);
+    ctx.save(); ctx.translate(tp.x, tp.y); ctx.rotate(ta);
+    ctx.beginPath(); ctx.moveTo(-0.6, 0); ctx.quadraticCurveTo(1.2, -3.6, 2.4, -3.8); ctx.lineTo(6.6, 0); ctx.lineTo(2.4, 3.8); ctx.quadraticCurveTo(1.2, 3.6, -0.6, 0); ctx.closePath();
+    ctx.fillStyle = '#6C0E13'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,190,150,0.35)'; ctx.lineWidth = 0.35; ctx.beginPath(); ctx.moveTo(0.4, 0); ctx.lineTo(5.6, 0); ctx.stroke();
     ctx.restore();
 
-    // Spines down the back, then moonlight along the top edge
-    ctx.fillStyle = BONE;
-    for (let k = 0; k < 5; k++) { const sx = 6 - k * 3.6, sy = -4.6 - Math.sin(k * 0.9) * 0.4; ctx.beginPath(); ctx.moveTo(sx - 1, sy + 0.6); ctx.lineTo(sx - 0.2, sy - 1.8); ctx.lineTo(sx + 0.8, sy + 0.6); ctx.closePath(); ctx.fill(); }
-    ctx.strokeStyle = RIM; ctx.lineWidth = 0.6;
-    ctx.beginPath(); ctx.moveTo(-10, -3.6); ctx.quadraticCurveTo(0, -6.4, 6, -4.6); ctx.quadraticCurveTo(12, -9.2, 17, -9.2); ctx.quadraticCurveTo(20, -11, 23.5, -8.8); ctx.stroke();
+    // Body: scaled crimson over gold belly plates
+    const torso = () => {
+      ctx.beginPath(); ctx.moveTo(-12.5, -1.4);
+      ctx.bezierCurveTo(-6, -5.6, 2, -6.8, 7.5, -5.4); ctx.bezierCurveTo(11, -4.4, 12.6, -2, 12.4, 1);
+      ctx.bezierCurveTo(11.8, 4.8, 6, 6.8, 0, 6.2); ctx.bezierCurveTo(-5, 5.8, -10.5, 4.6, -13.4, 2.2); ctx.closePath();
+    };
+    torso(); ctx.fillStyle = skin(-6.5, 6.5); ctx.fill();
+    ctx.save(); torso(); ctx.clip();
+    const plates = ctx.createLinearGradient(0, 1, 0, 7);
+    plates.addColorStop(0, GOLD0); plates.addColorStop(1, GOLD1);
+    ctx.fillStyle = plates;
+    ctx.beginPath(); ctx.moveTo(-14, 3.4); ctx.quadraticCurveTo(0, 2.2, 13.2, -1); ctx.lineTo(13.2, 8); ctx.lineTo(-14, 8); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(90,30,10,0.55)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    for (let px = -12; px <= 11; px += 2.2) { const py = 3.2 - (px + 14) * 0.15; ctx.moveTo(px, py); ctx.quadraticCurveTo(px + 1, py + 1.8, px + 0.4, py + 4.4); }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(26,0,4,0.32)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    for (let row = 0; row < 4; row++) {
+      const ry = -4.8 + row * 1.9;
+      for (let px = -13 + (row % 2) * 1.1; px < 12; px += 2.2) { ctx.moveTo(px - 1, ry); ctx.arc(px, ry, 1, Math.PI, 0, true); }
+    }
+    ctx.stroke();
+    ctx.restore();
+    torso(); ctx.strokeStyle = INK; ctx.lineWidth = 0.45; ctx.stroke();
 
-    wing(3, -3.6, 1, ['rgba(150,18,24,0.97)', 'rgba(236,96,48,0.86)'], true);
+    // Legs: a muscled hind leg folded back with talons trailing, and a
+    // clawed foreleg tucked under the chest
+    ctx.fillStyle = skin(0, 8);
+    ctx.beginPath(); ctx.ellipse(-8.6, 3, 4.6, 3.1, 0.5, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    ctx.strokeStyle = '#7A1217'; ctx.lineWidth = 2.1;
+    ctx.beginPath(); ctx.moveTo(-6.6, 5.4); ctx.lineTo(-11.6, 9.2); ctx.lineTo(-15, 10); ctx.stroke();
+    ctx.strokeStyle = GOLD1; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(-6.9, 6.2); ctx.lineTo(-11, 9.6); ctx.stroke();
+    ctx.strokeStyle = '#5E0A0F'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(7.6, 3.4); ctx.lineTo(5.8, 7.4); ctx.lineTo(9.4, 9); ctx.stroke();
+    ctx.fillStyle = BONE; ctx.beginPath();
+    [[-15, 10, -1], [-14.4, 10.6, -0.6], [-13.4, 10.4, 0.2]].forEach(([cx, cy, d]) => { ctx.moveTo(cx, cy - 0.5); ctx.quadraticCurveTo(cx - 1.4, cy + 0.2, cx - 1 + d, cy + 1.8); ctx.lineTo(cx + 0.4, cy + 0.4); ctx.closePath(); });
+    [[9.4, 9, 0], [9.8, 8.4, 0.4], [9, 9.5, -0.4]].forEach(([cx, cy, d]) => { ctx.moveTo(cx, cy - 0.45); ctx.quadraticCurveTo(cx + 1.4, cy - 0.2, cx + 1.3 + d, cy + 1.5); ctx.lineTo(cx - 0.3, cy + 0.4); ctx.closePath(); });
+    ctx.fill();
+
+    // Neck and head, pivoting at the base of the neck: a gentle ripple
+    // through the flight, plus `tilt` to aim
+    ctx.save();
+    ctx.translate(8.5, -3.5); ctx.rotate(tilt + Math.sin(phase * 0.5 + 1) * 0.07); ctx.translate(-8.5, 3.5);
+    const neck = [];
+    for (let i = 0; i <= 8; i++) {
+      const t = i / 8, u = 1 - t;
+      neck.push({ x: u * u * 7.2 + 2 * u * t * 15 + t * t * 20.6, y: u * u * -2.6 + 2 * u * t * -9.6 + t * t * -10.2, w: 3 - t * 1.35 });
+    }
+    // The neck runs toward the head, so its upper edge is the tube's `bot`
+    const nt = tube(neck), crest = nt.bot, throat = nt.top;
+    outline(nt.top, nt.bot); ctx.fillStyle = skin(-12, 0); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    ctx.strokeStyle = GOLD0; ctx.lineCap = 'butt';
+    for (let i = 0; i < 8; i++) {
+      const b0 = throat[i], b1 = throat[i + 1];
+      ctx.lineWidth = neck[i].w * 0.7;
+      ctx.beginPath(); ctx.moveTo(b0.x + (neck[i].x - b0.x) * 0.3, b0.y + (neck[i].y - b0.y) * 0.3);
+      ctx.lineTo(b1.x + (neck[i + 1].x - b1.x) * 0.3, b1.y + (neck[i + 1].y - b1.y) * 0.3); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(90,30,10,0.5)'; ctx.lineWidth = 0.3; ctx.beginPath();
+    for (let i = 1; i < 8; i++) { const b = throat[i]; ctx.moveTo(b.x, b.y); ctx.lineTo(b.x + (neck[i].x - b.x) * 0.6, b.y + (neck[i].y - b.y) * 0.6); }
+    ctx.stroke();
+    ctx.lineCap = 'round';
+    spikes(() => { for (let i = 1; i < 8; i++) edgeSpike(crest[i], 2.2 - i * 0.12, 0.8); });
+    if (inner > 0) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      [[0.15, 3.6], [0.45, 3], [0.75, 2.6]].forEach(([t, r]) => {
+        const p = neck[Math.round(t * 8)], fl2 = 0.8 + Math.sin(ts * 0.02 + t * 9) * 0.2;
+        ctx.globalAlpha = inner * 0.55 * fl2; ctx.drawImage(fire[2], p.x - r, p.y + 0.6 - r, r * 2, r * 2);
+      });
+      ctx.restore();
+    }
+
+    // Head, tipped down a touch at the end of the neck
+    ctx.save(); ctx.translate(20.6, -10.3); ctx.rotate(0.08);
+    const horn = (dx, dy, k2, near) => {
+      ctx.beginPath();
+      ctx.moveTo(0.6 + dx, -2.5 + dy);
+      ctx.quadraticCurveTo(-4 * k2 + dx, -4.8 * k2 + dy, -9.6 * k2 + dx, -6.9 * k2 + dy);
+      ctx.quadraticCurveTo(-4.2 * k2 + dx, -3.3 * k2 + dy, -1.4 + dx, -1 + dy);
+      ctx.closePath();
+      const hg = ctx.createLinearGradient(dx, dy - 2, -9.6 * k2 + dx, -6.9 * k2 + dy);
+      hg.addColorStop(0, near ? BONE : '#B4A28E'); hg.addColorStop(1, near ? '#5E4C40' : '#3C2E26');
+      ctx.fillStyle = hg; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+      ctx.strokeStyle = 'rgba(60,40,28,0.5)'; ctx.lineWidth = 0.3; ctx.beginPath();
+      for (let r = 1; r <= 3; r++) { const t = r / 4.2, hx = dx + (-9.6 * k2) * t * 0.95, hy = dy - 2.2 + (-6.9 * k2 + 2.2) * t; ctx.moveTo(hx + 0.2, hy - 0.9 + t * 0.3); ctx.lineTo(hx - 0.3, hy + 0.9 - t * 0.6); }
+      ctx.stroke();
+    };
+    horn(1.3, -0.7, 0.86, false);
+    // Lower jaw, hinged under the cheek; the dark mouth shows as it opens
+    const ja = jaw * 0.42;
+    if (ja > 0.02) {
+      ctx.fillStyle = '#250306';
+      ctx.beginPath(); ctx.moveTo(2.2, 1.2); ctx.lineTo(12.6, 0.9);
+      ctx.lineTo(2.6 + Math.cos(ja) * 10.2, 1.2 + Math.sin(ja) * 10.2); ctx.closePath(); ctx.fill();
+      if (inner > 0 || jaw > 0.5) {
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = Math.max(inner, jaw) * 0.8;
+        ctx.drawImage(fire[1], 6.5 - 4, 3 - 4, 8, 8); ctx.restore();
+      }
+    }
+    ctx.save(); ctx.translate(2.6, 1.2); ctx.rotate(ja);
+    ctx.fillStyle = BONE; ctx.beginPath();
+    for (let tx = 4.2; tx < 10; tx += 1.15) { ctx.moveTo(tx - 0.4, 0.1); ctx.lineTo(tx, -1.05 - (tx > 8.6 ? 0.4 : 0)); ctx.lineTo(tx + 0.4, 0.1); ctx.closePath(); }
+    ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-0.8, -0.2); ctx.quadraticCurveTo(4.5, 0.2, 9.8, 0); ctx.lineTo(10.3, 0.5); ctx.quadraticCurveTo(5.5, 2.3, 0.2, 1.8); ctx.closePath();
+    const jg = ctx.createLinearGradient(0, -0.2, 0, 2.2); jg.addColorStop(0, '#8A161B'); jg.addColorStop(1, GOLD1);
+    ctx.fillStyle = jg; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.35; ctx.stroke();
+    ctx.restore();
+    // Upper fangs, then the skull over their roots
+    ctx.fillStyle = BONE; ctx.beginPath();
+    for (let tx = 4.6; tx < 12.2; tx += 1.15) { const big = tx > 11 ? 0.6 : 0; ctx.moveTo(tx - 0.42, 0.9); ctx.lineTo(tx + 0.1, 2.15 + big); ctx.lineTo(tx + 0.42, 0.9); ctx.closePath(); }
+    ctx.fill();
+    const head = () => {
+      ctx.beginPath(); ctx.moveTo(-1.8, -1.2);
+      ctx.quadraticCurveTo(1.2, -3.3, 5.2, -2.7); ctx.lineTo(6.4, -3.15);
+      ctx.quadraticCurveTo(9.6, -2.3, 12.4, -1.1); ctx.quadraticCurveTo(13.5, -0.7, 13.4, 0.3); ctx.lineTo(12.6, 1);
+      ctx.quadraticCurveTo(8, 1.3, 3.4, 1.4); ctx.quadraticCurveTo(0.4, 1.8, -1.8, 0.9); ctx.closePath();
+    };
+    const hg2 = ctx.createLinearGradient(0, -3.3, 0, 1.6);
+    hg2.addColorStop(0, '#7A1116'); hg2.addColorStop(0.55, '#B22A25'); hg2.addColorStop(1, '#6A0C10');
+    head(); ctx.fillStyle = hg2; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,200,180,0.45)'; ctx.lineWidth = 0.35;
+    ctx.beginPath(); ctx.moveTo(-1, -1.9); ctx.quadraticCurveTo(2, -3.1, 5.2, -2.75); ctx.moveTo(6.8, -3); ctx.quadraticCurveTo(9.6, -2.2, 12.2, -1.15); ctx.stroke();
+    ctx.strokeStyle = 'rgba(30,0,4,0.4)'; ctx.beginPath(); ctx.moveTo(3.6, 0.2); ctx.quadraticCurveTo(7.5, -0.2, 11.4, -0.1); ctx.stroke();
+    // Cheek spikes and a frill of spines behind the head
+    spikes(() => {
+      spike(-1.2, 0.5, -0.92, 0.38, 2.6, 0.55); spike(-0.4, 1.3, -0.8, 0.6, 2, 0.45);
+      spike(-1.5, -0.9, -0.98, -0.2, 2.2, 0.5);
+    });
+    horn(0, 0, 1, true);
+    // Brow ridge over a glowing slit eye
+    ctx.fillStyle = '#3A0508';
+    ctx.beginPath(); ctx.moveTo(3.4, -2.2); ctx.quadraticCurveTo(5.4, -3.1, 7.2, -2.3); ctx.lineTo(6.6, -1.7); ctx.quadraticCurveTo(5.2, -2.2, 3.6, -1.6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#1A0204'; ctx.beginPath(); ctx.ellipse(5.4, -1.2, 1.35, 0.72, -0.12, 0, Math.PI * 2); ctx.fill();
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.6; ctx.drawImage(fire[2], 5.4 - 3.4, -1.2 - 3.4, 6.8, 6.8); ctx.restore();
+    const eg = ctx.createRadialGradient(5.3, -1.35, 0, 5.4, -1.2, 1.1);
+    eg.addColorStop(0, '#FFF6C0'); eg.addColorStop(0.5, '#FFC23A'); eg.addColorStop(1, '#E2561C');
+    ctx.fillStyle = eg; ctx.beginPath(); ctx.ellipse(5.4, -1.2, 1.05, 0.55, -0.12, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#120002'; ctx.beginPath(); ctx.ellipse(5.5, -1.2, 0.17, 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    // Nostril, smouldering when there's fire in the throat
+    ctx.fillStyle = '#1A0204'; ctx.beginPath(); ctx.ellipse(12.1, -0.45, 0.48, 0.26, -0.3, 0, Math.PI * 2); ctx.fill();
+    if (inner > 0) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.7;
+      ctx.drawImage(fire[3], 12.1 - 1.8, -0.45 - 1.8, 3.6, 3.6); ctx.restore();
+    }
+    ctx.restore();
+    ctx.restore();
+
+    // Spines down the back, then moonlight along the top edge and the
+    // stadium's warm light under the belly
+    spikes(() => {
+      [[6.2, -5.7, 2.5], [2.7, -6.3, 2.8], [-0.8, -6.1, 2.6], [-4.3, -5.3, 2.3], [-7.8, -4.1, 2], [-11, -2.5, 1.6]].forEach(([px, py, l]) => spike(px, py, -0.42, -0.91, l, l * 0.4));
+    });
+    ctx.strokeStyle = 'rgba(255,214,206,0.5)'; ctx.lineWidth = 0.55;
+    ctx.beginPath(); ctx.moveTo(-12.4, -1.7); ctx.bezierCurveTo(-6, -5.9, 2, -7.1, 7.5, -5.7); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,170,96,0.4)'; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.moveTo(-10, 4.6); ctx.bezierCurveTo(-4, 6.4, 6, 6.8, 11.6, 3); ctx.stroke();
+    if (inner > 0) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.4 * (0.85 + Math.sin(ts * 0.017) * 0.15);
+      ctx.drawImage(fire[3], 7 - 6, 2 - 6, 12, 12); ctx.restore();
+    }
+
+    wing(3.5, -4.8, 1, true);
     ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
     ctx.restore();
   }
@@ -1658,7 +2106,7 @@ export class BikeGame {
     // blur into each other.
     ctx.font = `italic 800 15px ${FONT_NUM}`; ctx.textAlign = 'center';
     for (let d = 0; d <= 800; d += 25) {
-      const wx = r.P2.x + d / 0.22, sx = wx - this.camX;
+      const wx = r.P2.x + this.mToPx(d, r), sx = wx - this.camX;
       if (sx < -40 || sx > W + 40) continue;
       const major = d % 100 === 0;
       ctx.strokeStyle = major ? '#2EE59D' : 'rgba(46,229,157,0.4)';
@@ -2796,11 +3244,27 @@ export class BikeGame {
   // a polished gold launch lip. It never changes shape between resizes, so
   // it's baked once into its own layer and stamped each frame at its
   // scrolled position.
-  drawRamp(r) {
+  drawRamp(r, ts = 0) {
     const key = `${this.cw}x${this.ch}@${this.dpr}:${r.rx}:${r.P2.x}:${r.gY}`;
     if (!this._rampLayer || this._rampLayer.key !== key) this._rampLayer = this.bakeRamp(r, key);
-    const L = this._rampLayer;
-    this.ctx.drawImage(L.canvas, L.x0 - this.camX, L.y0, L.w, L.h);
+    const L = this._rampLayer, ctx = this.ctx;
+    ctx.drawImage(L.canvas, L.x0 - this.camX, L.y0, L.w, L.h);
+    // Live on top of the baked ramp: a strobe on the launch lip, and the
+    // flame cannons either side of the tower firing as the bike launches
+    const lx = r.P2.x - this.camX, ly = r.P2.y + RAMP_DROP, gY = r.gY + RAMP_DROP;
+    if (lx < -160 || lx > this.cw + 160) return;
+    const blink = ts % 1100 < 90 ? 1 : ts % 1100 < 200 ? 0.35 : 0;
+    if (blink) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = blink;
+      ctx.drawImage(this.glowSprite(), lx - 14, ly - 14, 28, 28);
+      ctx.restore();
+    }
+    const since = this.phase === 'flying' && this.flyTs != null ? ts - this.flyTs : this.phase === 'ramp' && this.rampT > 0.85 ? 0 : -1;
+    if (since >= 0 && since < 1400) {
+      const k = Math.min(1, since / 120) * (1 - Math.max(0, (since - 900) / 500));
+      const towerW = Math.max(9, (r.P2.x - r.rx) * 0.11), h = Math.min(150, (gY - ly) * 1.25 + 40);
+      [lx - towerW - 14, lx + 14].forEach((cx, i) => this.drawFireStream(cx, gY - 10, cx + (i ? 8 : -8), gY - 10 - h, k, ts + i * 260, 11));
+    }
   }
 
   bakeRamp(r, key) {
@@ -2826,7 +3290,7 @@ export class BikeGame {
     const x0 = sx(r.rx), gY = r.gY + RAMP_DROP;
     const rampH = gY - P2.y, rampW = P2.x - x0;
     const at = (t) => bp(P0, P1, P2, t);
-    const thick = Math.max(5, rampH * 0.06), railH = Math.max(5, rampH * 0.07);
+    const thick = Math.max(7, rampH * 0.085), railH = Math.max(5, rampH * 0.07);
     const towerW = Math.max(9, rampW * 0.11);
 
     ctx.save();
@@ -2900,6 +3364,45 @@ export class BikeGame {
     ctx.restore();
     ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(rx0, gY - railH, P2.x - rx0, 1);
 
+    // Concrete footings under the posts and the tower
+    [...posts.slice(0, 3).map((p) => p.x), tL, tR].forEach((fx) => {
+      const fw = Math.max(5, tw * 4), fh = Math.max(3, railH * 0.6);
+      const fg = ctx.createLinearGradient(0, gY - fh, 0, gY);
+      fg.addColorStop(0, '#8C93A0'); fg.addColorStop(1, '#4E5562');
+      ctx.fillStyle = fg; ctx.beginPath(); ctx.roundRect(fx - fw / 2, gY - fh, fw, fh + 1, 1); ctx.fill();
+      ctx.strokeStyle = '#1A1F2A'; ctx.lineWidth = 0.8; ctx.stroke();
+    });
+
+    // Flame-cannon housings either side of the tower (they fire live, see
+    // drawRamp): squat black boxes with hazard-striped tops and a nozzle
+    [P2.x - towerW - 14, P2.x + 14].forEach((cx) => {
+      ctx.fillStyle = '#10141C'; ctx.beginPath(); ctx.roundRect(cx - 7, gY - 9, 14, 9.5, 1.5); ctx.fill();
+      ctx.strokeStyle = '#3A4458'; ctx.lineWidth = 0.8; ctx.stroke();
+      ctx.save(); ctx.beginPath(); ctx.rect(cx - 7, gY - 9, 14, 2.6); ctx.clip();
+      ctx.fillStyle = '#FFD23F'; ctx.fillRect(cx - 7, gY - 9, 14, 2.6);
+      ctx.fillStyle = '#10141C'; ctx.beginPath();
+      for (let sx2 = cx - 9; sx2 < cx + 8; sx2 += 4) { ctx.moveTo(sx2, gY - 6.4); ctx.lineTo(sx2 + 2, gY - 9); ctx.lineTo(sx2 + 4, gY - 9); ctx.lineTo(sx2 + 2, gY - 6.4); ctx.closePath(); }
+      ctx.fill(); ctx.restore();
+      ctx.fillStyle = '#2A3242'; ctx.fillRect(cx - 2, gY - 11.5, 4, 2.6);
+      ctx.fillStyle = '#05070B'; ctx.fillRect(cx - 1.2, gY - 11.5, 2.4, 1);
+    });
+
+    // Floodlights at the foot of the ramp washing light up the deck
+    const fl = { x: x0 + rampW * 0.08, y: gY - 2 };
+    const aim = at(0.62), fa = Math.atan2(aim.y - fl.y, aim.x - fl.x);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(fl.x, fl.y); ctx.rotate(fa);
+    const beamL = Math.hypot(aim.x - fl.x, aim.y - fl.y) * 1.1;
+    const beam = ctx.createLinearGradient(0, 0, beamL, 0);
+    beam.addColorStop(0, 'rgba(230,244,255,0.32)'); beam.addColorStop(1, 'rgba(200,226,255,0)');
+    ctx.fillStyle = beam; ctx.beginPath(); ctx.moveTo(0, -1.5); ctx.lineTo(beamL, -beamL * 0.2); ctx.lineTo(beamL, beamL * 0.2); ctx.lineTo(0, 1.5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.save(); ctx.translate(fl.x, fl.y); ctx.rotate(fa);
+    ctx.fillStyle = '#1A2030'; ctx.beginPath(); ctx.roundRect(-5, -3.2, 7, 6.4, 1.2); ctx.fill();
+    ctx.fillStyle = '#F4FAFF'; ctx.fillRect(1.6, -2.6, 1.2, 5.2);
+    ctx.restore();
+    ctx.fillStyle = '#1A2030'; ctx.fillRect(fl.x - 0.8, fl.y, 1.6, 2.5);
+
     // Deck: a thick curved board, its top face lit
     const deckBand = () => {
       ctx.beginPath();
@@ -2923,8 +3426,18 @@ export class BikeGame {
       ctx.moveTo(p.x + nx * 0.6, p.y + ny * 0.6); ctx.lineTo(p.x + nx * d, p.y + ny * d);
     }
     ctx.strokeStyle = 'rgba(6,10,20,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+    // Gold LED chevrons in the deck's side, pointing up the ramp
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let t = 0.28; t < 0.94; t += 0.075) {
+      const p = at(t), tn = bt(P0, P1, P2, t), L = Math.hypot(tn.x, tn.y), ux = tn.x / L, uy = tn.y / L, nx = -uy, ny = ux;
+      const c = { x: p.x + nx * thick * 0.55, y: p.y + ny * thick * 0.55 }, s = Math.min(thick * 0.32, 4);
+      const chev = () => { ctx.beginPath(); ctx.moveTo(c.x - ux * s + nx * s, c.y - uy * s + ny * s); ctx.lineTo(c.x + ux * s * 0.6, c.y + uy * s * 0.6); ctx.lineTo(c.x - ux * s - nx * s, c.y - uy * s - ny * s); };
+      ctx.strokeStyle = 'rgba(255,200,60,0.28)'; ctx.lineWidth = 3.4; chev(); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,226,120,0.95)'; ctx.lineWidth = 1.2; chev(); ctx.stroke();
+    }
+    ctx.restore();
     // LED strip along the deck's edge: a soft wide glow under a bright core
-    const strip = () => { ctx.beginPath(); ctx.moveTo(P0.x + thick * 1.6, P0.y - 0.5); ctx.quadraticCurveTo(P1.x + thick * 0.2, P1.y + thick * 0.55, P2.x - 1, P2.y + thick * 0.55); };
+    const strip = () => { ctx.beginPath(); ctx.moveTo(P0.x + thick * 2.6, P0.y - 0.5); ctx.quadraticCurveTo(P1.x + thick * 0.45, P1.y + thick * 0.95, P2.x - 1, P2.y + thick * 0.92); };
     ctx.lineCap = 'round';
     ctx.strokeStyle = 'rgba(46,229,157,0.22)'; ctx.lineWidth = 6; strip(); ctx.stroke();
     ctx.strokeStyle = '#7CFFCB'; ctx.lineWidth = 1.4; strip(); ctx.stroke();
@@ -2992,7 +3505,7 @@ export class BikeGame {
   // Where a wreck item sits: in the pit below the groomed track, further down
   // (and bigger) the closer it is to the camera.
   wreckPlacement(it, H, r) {
-    const wx = it.d >= 0 ? r.P2.x + it.d / 0.22 : r.rx + it.d;
+    const wx = it.d >= 0 ? r.P2.x + this.mToPx(it.d, r) : r.rx + it.d;
     const pitTop = r.gY + H * TRACK_FRAC;
     const y = pitTop + (H - pitTop) * it.depthT + BikeGame._wreckGroundBump(wx) * (0.6 + it.depthT);
     return { wx, y, scale: it.scale * (0.85 + it.depthT * 0.45) * 1.45 };
@@ -3015,7 +3528,7 @@ export class BikeGame {
 
     let minX = Infinity, maxX = -Infinity;
     this.wreckItems.forEach(it => {
-      const wx = (it.d >= 0 ? r.P2.x + it.d / 0.22 : r.rx + it.d) + it.lat;
+      const wx = (it.d >= 0 ? r.P2.x + this.mToPx(it.d, r) : r.rx + it.d) + it.lat;
       minX = Math.min(minX, wx); maxX = Math.max(maxX, wx);
     });
     if (!isFinite(minX)) { minX = 0; maxX = 0; }
@@ -4554,6 +5067,7 @@ export class BikeGame {
       }
 
       ctx.rotate(angle);
+      this._bikeAng = angle; // so the flames (drawBurning) follow it round
       // Whip: the bike yaws sideways, read as it foreshortening in side view.
       if (tr.kind === 'whip') ctx.scale(1 - 0.55 * Math.sin(tr.p * Math.PI), 1);
       this.drawMotoRider(ts);
@@ -4719,14 +5233,24 @@ export class BikeGame {
         cap.push({ x: 0, y: capY - capR * 0.32, r: capR * 0.74 });
         cap.push({ x: -capR * 0.45, y: capY - capR * 0.12, r: capR * 0.5 });
         cap.push({ x: capR * 0.5, y: capY - capR * 0.08, r: capR * 0.46 });
+        // Smaller puffs heaped over the top of the cap for a cauliflower crown
+        for (let i = 0; i < 9; i++) {
+          const a = Math.PI * (1.08 + (i / 8) * 0.84) + (rnd(i + 120) - 0.5) * 0.2;
+          cap.push({ x: Math.cos(a) * capR * 0.82, y: capY - capR * 0.18 + Math.sin(a) * capR * 0.62, r: capR * (0.24 + rnd(i + 130) * 0.12) });
+        }
         const all = [...stem, ...cap];
-        fillUnion(all, 1.08, 0, 4, '#110C0B', smokeA);
-        const body = ctx.createLinearGradient(0, capY - capR * 1.1, 0, ground);
-        body.addColorStop(0, '#63564F'); body.addColorStop(0.45, '#40352F'); body.addColorStop(1, '#271F1C');
-        fillUnion(all, 1, 0, 0, body, smokeA);
-        fillUnion(cap, 0.74, -capR * 0.13, -capR * 0.17, '#7C6D64', smokeA * 0.85);
-        fillUnion(cap, 0.44, -capR * 0.22, -capR * 0.3, '#998A80', smokeA * 0.65);
-        fillUnion(cap.slice(0, 13).filter((_, i) => i % 3 === 1), 0.4, capR * 0.1, capR * 0.12, '#2A211E', smokeA * 0.45);
+        // A dark silhouette for a crisp edge, then every billow as its own
+        // moonlit puff, lower ones first so the cap heaps up on top, each
+        // slowly churning
+        fillUnion(all, 1.06, 0, 3, '#110C0B', smokeA * 0.9);
+        const { smoke: sm } = this.billowSprites();
+        const order = all.map((b, i) => ({ b, i })).sort((p, q) => q.b.y - p.b.y);
+        order.forEach(({ b, i }) => {
+          const r = b.r * 1.12 * (1 + Math.sin(ts * 0.0022 + i * 1.9) * 0.04);
+          ctx.globalAlpha = smokeA;
+          ctx.drawImage(sm[i % 3], b.x - r, b.y - r, r * 2, r * 2);
+        });
+        ctx.globalAlpha = 1;
         // Fire-lit underside, fading as the flames die down
         const glow = c01(1 - (age - 8) / 64) * smokeA;
         if (glow > 0.01) {
@@ -4808,8 +5332,8 @@ export class BikeGame {
       const k = easeOut(age / 11), cool = c01(age / 48), fade = 1 - c01((age - 36) / 26);
       const fire = [];
       let minY = Infinity, maxR = 0;
-      for (let i = 0; i < 16; i++) {
-        const a = rnd(i) * Math.PI * 2, dist = (0.12 + rnd(i + 11) * 0.88) * 74 * k;
+      for (let i = 0; i < 22; i++) {
+        const a = rnd(i * 3.7) * Math.PI * 2, dist = (0.1 + rnd(i * 3.7 + 11) * 0.9) * 74 * k;
         const lift = (cy - capY) * rise * (0.5 + rnd(i + 22) * 0.5);
         const b = { x: Math.cos(a) * dist, y: cy - Math.abs(Math.sin(a)) * dist * 0.8 - lift, r: (20 + rnd(i + 33) * 24) * (0.42 + k * 0.85) * (1 + rise * 0.3) };
         fire.push(b); minY = Math.min(minY, b.y); maxR = Math.max(maxR, Math.hypot(b.x, b.y - cy) + b.r);
@@ -4820,21 +5344,34 @@ export class BikeGame {
       heat.addColorStop(0, `rgba(255,160,70,${0.5 * (1 - cool) * fade})`); heat.addColorStop(1, 'rgba(255,90,30,0)');
       ctx.fillStyle = heat; ctx.fillRect(-maxR * 1.7, fcy - maxR * 1.7, maxR * 3.4, maxR * 3.4);
       ctx.restore();
-      // Soot gathers round the outside as it cools…
-      fillUnion(fire, 1.1 * (1 - cool * 0.1), 0, 3, '#33251F', fade * c01(cool * 2) * 0.7);
-      // …around a body shaded hot-centre to cooler edge, dulling toward
-      // smoke-brown as it cools rather than just going see-through…
-      const lerp = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(',');
-      const bodyG = ctx.createRadialGradient(0, fcy, maxR * 0.05, 0, fcy, maxR);
-      bodyG.addColorStop(0, `rgb(${lerp([255, 190, 80], [176, 74, 32], cool)})`);
-      bodyG.addColorStop(0.55, `rgb(${lerp([244, 100, 30], [112, 42, 24], cool)})`);
-      bodyG.addColorStop(1, `rgb(${lerp([170, 40, 22], [58, 30, 24], cool)})`);
-      fillUnion(fire, 1.06 * (1 - cool * 0.3), 0, 0, bodyG, fade);
-      // …with a yellow heart and a white-hot core that burn away first
-      const midG = ctx.createRadialGradient(0, fcy - 4, 0, 0, fcy - 4, maxR * 0.8);
-      midG.addColorStop(0, '#FFF3C4'); midG.addColorStop(0.5, '#FFC83F'); midG.addColorStop(1, '#FF7A1F');
-      fillUnion(fire, 0.8 * (1 - cool * 0.58), 0, -3, midG, fade);
-      fillUnion(fire, 0.46 * (1 - cool * 1.25), 0, -5, '#FFFBEA', fade);
+      // A sooty rim gathers round the outside as it cools…
+      fillUnion(fire, 1.08 * (1 - cool * 0.1), 0, 3, '#2A1D18', fade * (0.35 + c01(cool * 2) * 0.45));
+      // …around a boiling heap of billows, each shaded hot centre to cooler
+      // edge: the outer ones cooler and drawn first, the hot heart heaped on
+      // top, everything dulling to smoke-brown as it cools…
+      const { fire: fb } = this.billowSprites();
+      const shrink = 1.06 * (1 - cool * 0.3);
+      fire.map((b, i) => ({ b, i, d: Math.hypot(b.x, b.y - fcy) / maxR }))
+        .sort((p, q) => q.d - p.d)
+        .forEach(({ b, i, d }) => {
+          const heat = Math.max(0, Math.min(5, Math.floor(cool * 4.4 + d * 1.9 + rnd(i + 44) * 0.6)));
+          const r = b.r * shrink * (1 + Math.sin(ts * 0.012 + i * 1.7) * 0.05);
+          ctx.globalAlpha = fade;
+          ctx.drawImage(fb[heat], b.x - r, b.y - r, r * 2, r * 2);
+        });
+      ctx.globalAlpha = 1;
+      // …with a white-hot core blazing through the middle that burns away first
+      const core = (1 - cool * 1.3) * fade;
+      if (core > 0.01) {
+        const { fire: fs } = this.fireSprites();
+        ctx.save(); ctx.globalCompositeOperation = 'lighter';
+        fire.forEach((b, i) => {
+          if (i % 2) return;
+          const r = b.r * 0.9 * (1 - cool * 0.5);
+          ctx.globalAlpha = core * 0.55; ctx.drawImage(fs[i % 4 ? 1 : 0], b.x - r, b.y - 3 - r, r * 2, r * 2);
+        });
+        ctx.restore();
+      }
     }
 
     // Shock ring

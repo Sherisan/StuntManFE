@@ -1,17 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { BikeGame } from './game/BikeGame.js';
 
+// `short` replaces `desc` on phones, where the copy sits in the top left
 const MODES = [
   { id: 'play', label: 'Play', kicker: 'Predict · Bet · Race', cta: 'Play now',
-    desc: 'Pick where the rider will land, place your bet and watch the jump. The closer your call, the bigger the payout — up to 8× for a Bullseye.' },
+    desc: 'Pick where the rider will land, place your bet and watch the jump. The closer your call, the bigger the payout — up to 8× for a Bullseye.',
+    short: 'Call the landing. Closer pays more — up to 8×.' },
   { id: 'auto', label: 'Auto Bet', kicker: 'Auto bet', cta: 'Set up auto bet',
-    desc: 'Run several rounds in a row with the same bet and pick. Set a stop loss and stop profit so it ends when you want it to.' },
+    desc: 'Run several rounds in a row with the same bet and pick. Set a stop loss and stop profit so it ends when you want it to.',
+    short: 'Same bet, many rounds. You set when it stops.' },
   { id: 'rules', label: 'Payout Rules', kicker: 'Payout rules', cta: 'See payouts',
-    desc: 'Bullseye within 5% pays 8×, Great Call within 15% pays 3×, Close Enough within 30% pays 1.5×. Anything further is a miss.' },
+    desc: 'Bullseye within 5% pays 8×, Great Call within 15% pays 3×, Close Enough within 30% pays 1.5×. Anything further is a miss.',
+    short: 'Within 5% pays 8×, 15% pays 3×, 30% pays 1.5×.' },
   { id: 'recent', label: 'History', kicker: 'Recent rounds', cta: 'View history',
-    desc: 'See your last rounds, where the rider landed against your pick, and your current streak.' },
+    desc: 'See your last rounds, where the rider landed against your pick, and your current streak.',
+    short: 'Your last rounds and current streak.' },
   { id: 'settings', label: 'Settings', kicker: 'Audio & account', cta: 'Open settings',
-    desc: 'Sound and music, bet history, account details and the fine print.' },
+    desc: 'Sound and music, bet history, account details and the fine print.',
+    short: 'Sound, history, account and fine print.' },
 ];
 
 const ICONS = {
@@ -156,23 +162,33 @@ export default function MainMenu({ balance, streak, history = [], onPlay, onAuto
         </div>
       </header>
 
+      {/* On desktop the intro and the actions stack on the left; on phones
+          the intro moves to the top left and the actions to the bottom,
+          leaving the middle clear for the live arena */}
       <section className="lobby-hero">
-        <div key={`k-${cur.id}`} className="lobby-kicker lobby-anim lobby-swap" style={{ '--d': '80ms' }}>{cur.kicker}</div>
-        <div className="lobby-title-row lobby-anim" style={{ '--d': '140ms' }}>
-          <svg className="lobby-bolt" aria-hidden="true" viewBox="0 0 24 28"><path d="M14 1 L3 16 h7 l-2 11 L21 11 h-7 z" fill="#FF8A1F" /></svg>
-          <h1 className="lobby-title" data-text="BIKE IT">BIKE <span>IT</span></h1>
+        <div className="lobby-intro">
+          <div key={`k-${cur.id}`} className="lobby-kicker lobby-anim lobby-swap" style={{ '--d': '80ms' }}>{cur.kicker}</div>
+          <div className="lobby-title-row lobby-anim" style={{ '--d': '140ms' }}>
+            <svg className="lobby-bolt" aria-hidden="true" viewBox="0 0 24 28"><path d="M14 1 L3 16 h7 l-2 11 L21 11 h-7 z" fill="#FF8A1F" /></svg>
+            <h1 className="lobby-title" data-text="BIKE IT">BIKE <span>IT</span></h1>
+          </div>
+          <p key={`d-${cur.id}`} className="lobby-desc lobby-anim lobby-swap" style={{ '--d': '220ms' }}>
+            <span className="lobby-desc-full">{cur.desc}</span>
+            <span className="lobby-desc-short">{cur.short}</span>
+          </p>
         </div>
-        <p key={`d-${cur.id}`} className="lobby-desc lobby-anim lobby-swap" style={{ '--d': '220ms' }}>{cur.desc}</p>
-        <div className="lobby-cta-row lobby-anim" style={{ '--d': '300ms' }}>
-          <button key={`c-${cur.id}`} type="button" className="lobby-cta lobby-swap" onClick={() => activate(cur.id)}>
-            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z" /></svg>
-            {cur.cta}
-          </button>
-        </div>
-        <div className="lobby-stats lobby-anim" style={{ '--d': '380ms' }}>
-          <div className="lobby-stat lobby-stat-green"><span>Balance</span><b>R{balance.toFixed(2)}</b></div>
-          <div className={'lobby-stat ' + (streak?.type === 'loss' ? 'lobby-stat-red' : 'lobby-stat-blue')}><span>Streak</span><b>{streakLabel}</b></div>
-          <div className="lobby-stat lobby-stat-gold"><span>Top payout</span><b>8× Bullseye</b></div>
+        <div className="lobby-actions">
+          <div className="lobby-cta-row lobby-anim" style={{ '--d': '300ms' }}>
+            <button key={`c-${cur.id}`} type="button" className="lobby-cta lobby-swap" onClick={() => activate(cur.id)}>
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z" /></svg>
+              {cur.cta}
+            </button>
+          </div>
+          <div className="lobby-stats lobby-anim" style={{ '--d': '380ms' }}>
+            <div className="lobby-stat lobby-stat-green"><span>Balance</span><b>R{balance.toFixed(2)}</b></div>
+            <div className={'lobby-stat ' + (streak?.type === 'loss' ? 'lobby-stat-red' : 'lobby-stat-blue')}><span>Streak</span><b>{streakLabel}</b></div>
+            <div className="lobby-stat lobby-stat-gold"><span>Top payout</span><b>8× Bullseye</b></div>
+          </div>
         </div>
       </section>
 
