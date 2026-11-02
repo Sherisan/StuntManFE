@@ -27,7 +27,7 @@ function computeRamp(W, H) {
   const portrait = H > W;
   const s = Math.max(0.55, Math.min(1.2, H / 560, W / (portrait ? 380 : 500)));
   const gY = H * 0.72;
-  const rx = W * (portrait ? 0.47 : 0.40);
+  const rx = W * (portrait ? 0.45 : 0.40);
   const rw = 150 * s;
   const rh = 146 * s;
   const P0 = { x: rx, y: gY };

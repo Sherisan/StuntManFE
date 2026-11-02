@@ -1,22 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
 import { BikeGame } from './game/BikeGame.js';
+import { PAYOUT_TIERS } from './game/logic.js';
 
-// On phones `short` replaces `desc` (the copy sits in the top left) and
-// `tab` labels each icon in the mode dock
+// On phones `short` replaces `desc` (the copy sits in the top left),
+// `sub` is the line of pull under the big button and `tab` labels each
+// icon in the mode dock
 const MODES = [
-  { id: 'play', label: 'Play', tab: 'Play', kicker: 'Predict · Bet · Race', cta: 'Play now',
+  { id: 'play', label: 'Play', tab: 'Play', kicker: 'Predict · Bet · Race', cta: 'Play now', sub: 'Win up to 8× your bet',
     desc: 'Pick where the rider will land, place your bet and watch the jump. The closer your call, the bigger the payout — up to 8× for a Bullseye.',
     short: 'Call the landing. Closer pays more — up to 8×.' },
-  { id: 'auto', label: 'Auto Bet', tab: 'Auto', kicker: 'Auto bet', cta: 'Set up auto bet',
+  { id: 'auto', label: 'Auto Bet', tab: 'Auto', kicker: 'Auto bet', cta: 'Set up auto bet', sub: 'Pick once, ride many rounds',
     desc: 'Run several rounds in a row with the same bet and pick. Set a stop loss and stop profit so it ends when you want it to.',
     short: 'Same bet, many rounds. You set when it stops.' },
-  { id: 'rules', label: 'Payout Rules', tab: 'Rules', kicker: 'Payout rules', cta: 'See payouts',
+  { id: 'rules', label: 'Payout Rules', tab: 'Rules', kicker: 'Payout rules', cta: 'See payouts', sub: 'Three ways to win',
     desc: 'Bullseye within 5% pays 8×, Great Call within 15% pays 3×, Close Enough within 30% pays 1.5×. Anything further is a miss.',
     short: 'Within 5% pays 8×, 15% pays 3×, 30% pays 1.5×.' },
-  { id: 'recent', label: 'History', tab: 'History', kicker: 'Recent rounds', cta: 'View history',
+  { id: 'recent', label: 'History', tab: 'History', kicker: 'Recent rounds', cta: 'View history', sub: 'Your rounds and streak',
     desc: 'See your last rounds, where the rider landed against your pick, and your current streak.',
     short: 'Your last rounds and current streak.' },
-  { id: 'settings', label: 'Settings', tab: 'Settings', kicker: 'Audio & account', cta: 'Open settings',
+  { id: 'settings', label: 'Settings', tab: 'Settings', kicker: 'Audio & account', cta: 'Open settings', sub: 'Sound, music and account',
     desc: 'Sound and music, bet history, account details and the fine print.',
     short: 'Sound, history, account and fine print.' },
 ];
@@ -157,6 +159,12 @@ export default function MainMenu({ balance, streak, onPlay, onAutoBet, onPrepare
             <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9" /><path d="M9 8h4a2.5 2.5 0 0 1 0 5H9zM9 13l5 4" strokeLinecap="round" strokeLinejoin="round" /></svg>
             <span>R{balance.toFixed(2)}</span>
           </div>
+          {/* Phones: the streak rides up here once there is one */}
+          {streak?.current > 0 && (
+            <div className={'lobby-streak' + (streak.type === 'loss' ? ' is-loss' : '')}>
+              <span aria-hidden="true">{streak.type === 'win' ? '🔥' : '❄️'}</span>{streakLabel}
+            </div>
+          )}
           <button type="button" aria-label="Settings" className="lobby-icon-btn" onClick={onSettings}>
             <Icon name="settings" />
           </button>
@@ -181,14 +189,28 @@ export default function MainMenu({ balance, streak, onPlay, onAutoBet, onPrepare
         <div ref={actionsRef} className="lobby-actions">
           <div className="lobby-cta-row lobby-anim" style={{ '--d': '300ms' }}>
             <button key={`c-${cur.id}`} type="button" className="lobby-cta lobby-swap" onClick={() => activate(cur.id)}>
+              <span className="lobby-cta-shine" aria-hidden="true" />
               <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z" /></svg>
-              {cur.cta}
+              <span className="lobby-cta-text">
+                {cur.cta}
+                <small>{cur.sub}</small>
+              </span>
             </button>
           </div>
           <div className="lobby-stats lobby-anim" style={{ '--d': '380ms' }}>
             <div className="lobby-stat lobby-stat-green"><span>Balance</span><b>R{balance.toFixed(2)}</b></div>
             <div className={'lobby-stat ' + (streak?.type === 'loss' ? 'lobby-stat-red' : 'lobby-stat-blue')}><span>Streak</span><b>{streakLabel}</b></div>
             <div className="lobby-stat lobby-stat-gold"><span>Top payout</span><b>8× Bullseye</b></div>
+          </div>
+          {/* Phones: the three ways to win, in place of the stat cards */}
+          <div className="lobby-tiers lobby-anim" style={{ '--d': '380ms' }} aria-label="Ways to win">
+            {PAYOUT_TIERS.map((t) => (
+              <div key={t.key} className={`lobby-tier lobby-tier-${t.key}`}>
+                <b><span aria-hidden="true">{t.icon}</span>{t.mult}×</b>
+                <span>{t.label}</span>
+                <small>{t.range}</small>
+              </div>
+            ))}
           </div>
         </div>
       </section>
