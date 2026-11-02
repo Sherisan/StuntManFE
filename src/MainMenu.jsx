@@ -1,21 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { BikeGame } from './game/BikeGame.js';
 
-// `short` replaces `desc` on phones, where the copy sits in the top left
+// On phones `short` replaces `desc` (the copy sits in the top left) and
+// `tab` labels each icon in the mode dock
 const MODES = [
-  { id: 'play', label: 'Play', kicker: 'Predict · Bet · Race', cta: 'Play now',
+  { id: 'play', label: 'Play', tab: 'Play', kicker: 'Predict · Bet · Race', cta: 'Play now',
     desc: 'Pick where the rider will land, place your bet and watch the jump. The closer your call, the bigger the payout — up to 8× for a Bullseye.',
     short: 'Call the landing. Closer pays more — up to 8×.' },
-  { id: 'auto', label: 'Auto Bet', kicker: 'Auto bet', cta: 'Set up auto bet',
+  { id: 'auto', label: 'Auto Bet', tab: 'Auto', kicker: 'Auto bet', cta: 'Set up auto bet',
     desc: 'Run several rounds in a row with the same bet and pick. Set a stop loss and stop profit so it ends when you want it to.',
     short: 'Same bet, many rounds. You set when it stops.' },
-  { id: 'rules', label: 'Payout Rules', kicker: 'Payout rules', cta: 'See payouts',
+  { id: 'rules', label: 'Payout Rules', tab: 'Rules', kicker: 'Payout rules', cta: 'See payouts',
     desc: 'Bullseye within 5% pays 8×, Great Call within 15% pays 3×, Close Enough within 30% pays 1.5×. Anything further is a miss.',
     short: 'Within 5% pays 8×, 15% pays 3×, 30% pays 1.5×.' },
-  { id: 'recent', label: 'History', kicker: 'Recent rounds', cta: 'View history',
+  { id: 'recent', label: 'History', tab: 'History', kicker: 'Recent rounds', cta: 'View history',
     desc: 'See your last rounds, where the rider landed against your pick, and your current streak.',
     short: 'Your last rounds and current streak.' },
-  { id: 'settings', label: 'Settings', kicker: 'Audio & account', cta: 'Open settings',
+  { id: 'settings', label: 'Settings', tab: 'Settings', kicker: 'Audio & account', cta: 'Open settings',
     desc: 'Sound and music, bet history, account details and the fine print.',
     short: 'Sound, history, account and fine print.' },
 ];
@@ -86,14 +87,33 @@ function useArena(canvasRef) {
   }, [canvasRef]);
 }
 
-export default function MainMenu({ balance, streak, history = [], onPlay, onAutoBet, onPrepare, onRules, onHistory, onSettings }) {
+// Publishes where the Play button block starts (--act-top, from the lobby's
+// top edge) so the portrait-phone CSS can size the arena to put its ground
+// line just above the button and start the bottom fade there — on any phone
+// height. offsetTop ignores the entrance transforms, so it's stable from the
+// first frame.
+function useActionsTop(lobbyRef, heroRef, actionsRef) {
+  useEffect(() => {
+    const lobby = lobbyRef.current, hero = heroRef.current, actions = actionsRef.current;
+    const fit = () => lobby.style.setProperty('--act-top', `${hero.offsetTop + actions.offsetTop}px`);
+    fit();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(fit) : null;
+    ro?.observe(lobby);
+    ro?.observe(actions);
+    return () => ro?.disconnect();
+  }, [lobbyRef, heroRef, actionsRef]);
+}
+
+export default function MainMenu({ balance, streak, onPlay, onAutoBet, onPrepare, onRules, onHistory, onSettings }) {
   const [sel, setSel] = useState('play');
   // `ready` ends the staggered entrance (after that, switching modes just
   // crossfades the text); `leaving` fades the whole lobby out into the game.
   const [ready, setReady] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const arenaRef = useRef(null);
+  const lobbyRef = useRef(null), heroRef = useRef(null), actionsRef = useRef(null);
   useArena(arenaRef);
+  useActionsTop(lobbyRef, heroRef, actionsRef);
   useEffect(() => { const t = setTimeout(() => setReady(true), 1300); return () => clearTimeout(t); }, []);
 
   const activate = (id) => {
@@ -122,36 +142,17 @@ export default function MainMenu({ balance, streak, history = [], onPlay, onAuto
   }, [sel]);
 
   const cur = MODES.find((m) => m.id === sel);
-  // Both bet slips of a round share one timestamp, so dedupe by time to get
-  // one chip per round for the crash-style results strip.
-  const recentRounds = history.filter((h, i, arr) => arr.findIndex((o) => o.time === h.time) === i).slice(0, 8);
   const streakLabel = streak && streak.current > 0
     ? `${streak.current} ${streak.type === 'win' ? 'WIN' : 'LOSS'}${streak.current > 1 ? 'S' : ''}`
     : 'None yet';
 
   return (
-    <div className={'lobby' + (ready ? ' is-ready' : '') + (leaving ? ' is-leaving' : '')}>
+    <div ref={lobbyRef} className={'lobby' + (ready ? ' is-ready' : '') + (leaving ? ' is-leaving' : '')}>
       <canvas ref={arenaRef} className="lobby-arena" aria-hidden="true" />
       <div className="lobby-shade" aria-hidden="true" />
 
       <header className="lobby-top lobby-anim" style={{ '--d': '0ms' }}>
-        <div className="lobby-results" aria-label="Recent results">
-          <span className="lobby-results-lbl">Recent</span>
-          <div className="lobby-results-strip">
-            {recentRounds.length === 0
-              ? Array.from({ length: 6 }, (_, i) => <span key={i} className="lobby-chip lobby-chip-empty">—</span>)
-              : recentRounds.map((r) => (
-                <span key={r.time} className={'lobby-chip ' + (!r.won ? 'lobby-chip-miss' : r.mult >= 8 ? 'lobby-chip-top' : r.mult >= 3 ? 'lobby-chip-great' : 'lobby-chip-win')}>
-                  {r.won ? `${r.mult}×` : `${r.dist}m`}
-                </span>
-              ))}
-          </div>
-        </div>
         <div className="lobby-top-right">
-          <div className="lobby-fair">
-            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z" /><path d="M8.5 12l2.5 2.5 4.5-5" strokeLinecap="round" /></svg>
-            <span>Provably fair</span>
-          </div>
           <div className="lobby-balance">
             <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9" /><path d="M9 8h4a2.5 2.5 0 0 1 0 5H9zM9 13l5 4" strokeLinecap="round" strokeLinejoin="round" /></svg>
             <span>R{balance.toFixed(2)}</span>
@@ -165,7 +166,7 @@ export default function MainMenu({ balance, streak, history = [], onPlay, onAuto
       {/* On desktop the intro and the actions stack on the left; on phones
           the intro moves to the top left and the actions to the bottom,
           leaving the middle clear for the live arena */}
-      <section className="lobby-hero">
+      <section ref={heroRef} className="lobby-hero">
         <div className="lobby-intro">
           <div key={`k-${cur.id}`} className="lobby-kicker lobby-anim lobby-swap" style={{ '--d': '80ms' }}>{cur.kicker}</div>
           <div className="lobby-title-row lobby-anim" style={{ '--d': '140ms' }}>
@@ -177,7 +178,7 @@ export default function MainMenu({ balance, streak, history = [], onPlay, onAuto
             <span className="lobby-desc-short">{cur.short}</span>
           </p>
         </div>
-        <div className="lobby-actions">
+        <div ref={actionsRef} className="lobby-actions">
           <div className="lobby-cta-row lobby-anim" style={{ '--d': '300ms' }}>
             <button key={`c-${cur.id}`} type="button" className="lobby-cta lobby-swap" onClick={() => activate(cur.id)}>
               <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z" /></svg>
@@ -198,7 +199,8 @@ export default function MainMenu({ balance, streak, history = [], onPlay, onAuto
             className={'lobby-mode' + (m.id === sel ? ' on' : '')}
             onClick={() => setSel(m.id)} onDoubleClick={() => activate(m.id)}>
             <Icon name={m.id} />
-            <span>{m.label}</span>
+            <span className="lobby-mode-lbl">{m.label}</span>
+            <span className="lobby-mode-tab">{m.tab}</span>
           </button>
         ))}
       </nav>

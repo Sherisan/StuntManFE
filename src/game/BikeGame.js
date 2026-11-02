@@ -18,11 +18,16 @@ const WEATHERS = [
 // by `s` — so it never turns into a steep spike on a narrow phone. The
 // flight physics (gravity, speeds) and the pixels-per-metre scale by the
 // same `s`, so a round's launch angle and drop are identical everywhere and
-// it lands the same number of metres out on a phone as on a desktop.
+// it lands the same number of metres out on a phone as on a desktop. On a
+// tall, narrow (portrait) screen the ramp sits further right, so the rider
+// waiting at the start line has a proper run-up instead of idling right at
+// its foot, and it's sized to the room actually there — a narrow width alone
+// no longer shrinks it to a sliver beside a full-size bike.
 function computeRamp(W, H) {
-  const s = Math.max(0.55, Math.min(1.2, H / 560, W / 500));
+  const portrait = H > W;
+  const s = Math.max(0.55, Math.min(1.2, H / 560, W / (portrait ? 380 : 500)));
   const gY = H * 0.72;
-  const rx = W * 0.40;
+  const rx = W * (portrait ? 0.47 : 0.40);
   const rw = 150 * s;
   const rh = 146 * s;
   const P0 = { x: rx, y: gY };
@@ -204,7 +209,7 @@ export class BikeGame {
     this._onResize = () => { this.resize(); if (this.phase === 'idle' && !this._suspended) this.drawIdle(); };
 
     this.resize();
-    this.buildCrowd();
+    this.crowdRows = []; // built on first draw, sized to the stand (ensureCrowdModel)
     this.buildWrecks();
     window.addEventListener('resize', this._onResize);
     // A ResizeObserver on the canvas itself catches size changes a window
@@ -340,6 +345,7 @@ export class BikeGame {
     this.bx = this.startX(r); this.by = r.gY; this.bvx = 3.8; this.bvy = 0;
 
     this.cb.onRaceStart?.();
+    this.cb.onSfx?.('race-start');
     this.phase = 'approach';
     this.cb.onPhase?.('approach');
     this.raf = requestAnimationFrame(this._loop);
@@ -347,6 +353,7 @@ export class BikeGame {
 
   reset() {
     if (this.raf) cancelAnimationFrame(this.raf); // ends an animateDone crash loop
+    this.cb.onSfx?.('stop');
     this.phase = 'idle';
     this.camX = this.camBias(); this.camTargetX = this.camX; this.camY = 0; this.camTargetY = 0;
     this.drawIdle();
@@ -530,6 +537,7 @@ export class BikeGame {
     if (this.phase === 'approach') {
       if (!this.approachTs) this.approachTs = ts;
       this.bvx = (3.8 + (ts - this.approachTs) / 160) * r.s; this.bx += this.bvx; this.by = r.gY; this.camX = this.camBias();
+      this.cb.onSfx?.('engine', Math.min(0.85, (this.bvx / r.s - 3.8) / 7));
       this.camY = this.camLerp(this.camY, 0, 0.08, camDt);
       this.drawScene(ts, false);
       if (this.bx >= r.P0.x) { this.bx = r.P0.x; this.by = r.P0.y; this.rampT = 0; this.rampTs = ts; this.phase = 'ramp'; }
@@ -539,6 +547,7 @@ export class BikeGame {
     if (this.phase === 'ramp') {
       this.rampT = Math.min((ts - this.rampTs) / 550, 1);
       const pt = bp(r.P0, r.P1, r.P2, this.rampT); this.bx = pt.x; this.by = pt.y; this.camX = this.camBias();
+      this.cb.onSfx?.('engine', 0.85 + this.rampT * 0.15);
       this.camY = this.camLerp(this.camY, 0, 0.08, camDt);
       this.drawScene(ts, false);
       if (this.rampT >= 1) {
@@ -550,7 +559,10 @@ export class BikeGame {
         this.flyMs = this.flightMs(r);
         this.trick = this.pickTrick(this.flyMs);
         this._attack = this.flyMs > 1300 && Math.random() < this.dragonChance;
+        this._trickSfx = false;
         this.cb.onPhase?.('flying');
+        this.cb.onSfx?.('takeoff');
+        this.cb.onSfx?.('cannons');
       }
       this.raf = requestAnimationFrame(this._loop); return;
     }
@@ -577,6 +589,8 @@ export class BikeGame {
         speed: Math.round(85 + this.mult * 24),
         height: Math.round(Math.abs(Math.sin(el / 850)) * this.mult * 12),
       });
+      this.cb.onSfx?.('wind', this.mult);
+      if (!this._trickSfx && this.trickState(ts).p > 0) { this._trickSfx = true; this.cb.onSfx?.('trick'); }
       this.physStep(r, ts); this.drawScene(ts, false);
       this.raf = requestAnimationFrame(this._loop); return;
     }
@@ -637,6 +651,7 @@ export class BikeGame {
         this.landedGood = this.cheer > 0;
         this.spawnParticles(this.cheer);
         this.cb.onShake?.();
+        this.cb.onSfx?.('crash');
       } else if (this.phase === 'crashing') {
         this.bvx = 0; this.bvy = 0;
       }
@@ -674,12 +689,15 @@ export class BikeGame {
       if (p.life <= 0) return;
       const sx = p.x - this.camX;
       if (p.type === 'flame') {
-        // A scrap of fire shed by the burning bike: flares, swells and cools
-        // from yellow to deep red as it drifts up and falls behind
-        const age = 1 - p.life, r = p.r * (0.7 + age * 1.3), img = this.fireSprites().fire[Math.min(7, 1 + Math.floor(age * 7))];
-        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = Math.min(1, p.life * 1.8) * 0.85;
-        ctx.drawImage(img, sx - r, p.y - r, r * 2, r * 2);
+        // A scrap of fire shed by the burning bike: a small tongue that
+        // flares up, then shrinks and gutters out as it falls behind, over a
+        // faint glow
+        const age = 1 - p.life, h = p.r * 2.6 * Math.sin(Math.min(1, p.life * 1.25) * Math.PI * 0.5) * (0.85 + age * 0.4);
+        const img = this.fireSprites().fire[Math.min(7, 2 + Math.floor(age * 6))], r = p.r * 0.9;
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = p.life * 0.45;
+        ctx.drawImage(img, sx - r, p.y - r * 0.8, r * 2, r * 2);
         ctx.restore();
+        this.drawFlame(sx, p.y + h * 0.2, h, p.rot, p.v + Math.floor(age * 7), Math.min(1, p.life * 2.2), 0.85);
         return;
       }
       if (p.type === 'smoke') {
@@ -1125,6 +1143,13 @@ export class BikeGame {
   // moon now and then, two gulls closer in, and the odd pterosaur.
   drawFlyers(W, H, ts, layer) {
     if (layer === 'far') {
+      // A pair of vultures riding the warm air over the arena, circling
+      // high above the bone yard on wide, steady wings
+      const vs = Math.max(13, Math.min(24, W / 52));
+      [[0.3, 0.13, 0, 1], [0.7, 0.08, 2.4, 0.82]].forEach(([fx, fy, off, k], i) => {
+        const th = ts * 0.00042 * (i ? -1 : 1) + off, R = W * 0.11;
+        this.drawVulture(W * fx + Math.cos(th) * R, H * fy + Math.sin(th) * R * 0.28, vs * k, -Math.sin(th) * (i ? -1 : 1), ts * 0.004 + i * 2);
+      });
       const t = ((ts + 6000) % 30000) / 30000;
       const lx = -170 + t * (W + 440), ly = H * 0.1 + Math.sin(t * 9) * 5;
       [[0, 0, 7], [-16, -7, 6.4], [-15, 8, 6.6], [-31, -13, 6], [-30, 15, 6.2], [-47, -19, 5.6], [-45, 22, 5.8], [-62, -24, 5.1], [-60, 28, 5.3]]
@@ -1155,6 +1180,8 @@ export class BikeGame {
       const phase = ts * 0.0032, ft = (ts % 7000) / 7000;
       const breath = ft < 0.2 ? Math.sin((ft / 0.2) * Math.PI) : 0;
       const pose = { tilt: 0.24 * breath, jaw: Math.min(1, breath * 1.6), glow: ft > 0.9 ? (ft - 0.9) / 0.1 : breath };
+      const cycle = Math.floor(ts / 7000);
+      if (breath > 0 && this._puffCycle !== cycle && d.x > -40 && d.x < W + 40) { this._puffCycle = cycle; this.cb.onSfx?.('dragon-puff'); }
       this.drawDragon(d.x, d.y, d.scale, phase, ts, 1, pose);
       const m = this.dragonMouth(d, phase, pose.tilt);
       if (breath > 0) {
@@ -1193,6 +1220,7 @@ export class BikeGame {
       const onScreen = d.mode === 'patrol' && px > -40 && px < W + 40;
       this._attack = false;
       d.mode = 'swoop';
+      this.cb.onSfx?.('dragon-roar');
       if (!onScreen) { d.x = W + 90; d.y = -50; }
     }
     if (d.mode === 'patrol') { d.x = px; d.y = py; d.facing = 1; return d; }
@@ -1203,7 +1231,7 @@ export class BikeGame {
       const k = 1 - Math.pow(1 - 0.09, step);
       d.x += (tx - d.x) * k; d.y += (ty - d.y) * k;
       d.facing = rider.x < d.x ? -1 : 1;
-      if (d.mode === 'swoop' && Math.hypot(tx - d.x, ty - d.y) < 34) { d.mode = 'blast'; d.t0 = ts; }
+      if (d.mode === 'swoop' && Math.hypot(tx - d.x, ty - d.y) < 34) { d.mode = 'blast'; d.t0 = ts; this.cb.onSfx?.('dragon-fire'); }
       if (d.mode === 'blast' && ts - d.t0 > 950) d.mode = 'leave';
       return d;
     }
@@ -1218,7 +1246,7 @@ export class BikeGame {
   // head tilt. Mirrors drawDragon's transforms: the neck pivots at its
   // base, the head sits tipped down slightly at the end of it.
   dragonMouth(d, phase, tilt) {
-    const a = tilt + Math.sin(phase * 0.5 + 1) * 0.07, ox = 32.5 - 8.5, oy = -8 + 3.5;
+    const a = tilt + Math.sin(phase * 0.5 + 1) * 0.07, ox = 35 - 8.5, oy = -7.6 + 3.5;
     const mx = 8.5 + ox * Math.cos(a) - oy * Math.sin(a), my = -3.5 + ox * Math.sin(a) + oy * Math.cos(a);
     return { x: d.x + mx * d.scale * d.facing, y: d.y + Math.sin(phase) * 2.4 + my * d.scale, a: a + 0.08 };
   }
@@ -1246,7 +1274,7 @@ export class BikeGame {
     if (!blast) return;
     const m = this.dragonMouth(d, phase, tilt);
     this.drawFireStream(m.x, m.y, rx, ry, jet, ts, 8.5 * d.scale);
-    if (k > 0.32 && this.burnT == null && this.phase === 'flying') this.burnT = ts;
+    if (k > 0.32 && this.burnT == null && this.phase === 'flying') { this.burnT = ts; this.cb.onSfx?.('burn-start'); }
   }
 
   // Cached soft puffs for fire and smoke, so a flame can be dozens of
@@ -1290,93 +1318,243 @@ export class BikeGame {
     const fire = [
       ['255,252,234', '255,228,146', '255,172,64'], ['255,238,166', '255,184,72', '236,98,32'], ['255,204,100', '246,124,38', '192,60,24'],
       ['242,144,58', '204,80,30', '130,42,22'], ['172,90,48', '120,54,34', '72,40,30'], ['100,74,60', '68,50,44', '42,32,30'],
-    ].map(([a, b, c]) => make([[0, `rgba(${a},1)`], [0.52, `rgba(${b},1)`], [0.8, `rgba(${c},0.85)`], [1, `rgba(${c},0)`]], 30, 28));
+    ].map(([a, b, c]) => make([[0, `rgba(${a},1)`], [0.5, `rgba(${b},1)`], [0.84, `rgba(${c},1)`], [0.93, `rgba(${c},0.85)`], [1, `rgba(${c},0)`]], 30, 28));
     const smoke = [['150,140,136', '92,84,82', '46,40,40'], ['118,108,104', '72,64,62', '34,30,30'], ['84,76,74', '52,46,46', '24,20,20']]
-      .map(([a, b, c]) => make([[0, `rgba(${a},1)`], [0.48, `rgba(${b},1)`], [0.86, `rgba(${c},0.97)`], [1, `rgba(${c},0)`]], 22, 20));
+      .map(([a, b, c]) => make([[0, `rgba(${a},1)`], [0.48, `rgba(${b},1)`], [0.88, `rgba(${c},1)`], [0.95, `rgba(${c},0.85)`], [1, `rgba(${c},0)`]], 22, 20));
     return (this._billows = { fire, smoke });
   }
 
-  // A roaring stream of fire from (x0, y0) toward (x1, y1): dozens of soft
-  // puffs pouring out of a white-hot throat, swelling, rising and cooling
-  // from yellow through orange to red as they go, breaking up into smoke at
-  // the far end and splashing round whatever they hit, with sparks spitting
-  // off the sides. `k` (0…1) is how hard it's blowing — it grows the stream
-  // out and back — and `w` its width at the mouth. Purely a function of
-  // `ts`, so it needs no state.
+  // Cached cartoon flame tongues, each a crisp stack of flat layers: a deep
+  // red-orange body with pointed licks up its sides and a thin scorched
+  // edge, an orange layer, a yellow heart and a white-hot root. The base
+  // sits at the bottom centre of the sprite and the tip curls over at the
+  // top; six variants curl and lick differently, so cycling through them
+  // reads as flicker. drawFlame stands one at any spot, size and angle.
+  flameSprites() {
+    if (this._flames) return this._flames;
+    const SW = 96, SH = 172, bx = SW / 2, by = SH - 14, FH = 146, FW = 50;
+    const VARIANTS = [
+      { curl: 0.9, licks: [[-1, 0.4, 0.95], [1, 0.6, 0.75]] },
+      { curl: -1, licks: [[1, 0.36, 1], [-1, 0.58, 0.7]] },
+      { curl: 0.45, licks: [[-1, 0.5, 0.9], [1, 0.3, 0.55]] },
+      { curl: -0.55, licks: [[1, 0.48, 0.9], [-1, 0.3, 0.6]] },
+      { curl: 1.2, licks: [[1, 0.34, 0.7], [-1, 0.55, 0.9]] },
+      { curl: -1.2, licks: [[-1, 0.42, 0.8], [1, 0.64, 0.65]] },
+    ];
+    // Outline of one layer: a rounded root swelling out, then tapering to a
+    // point that curls over, with each lick a hooked spike off the side.
+    const outline = (x, h, w, base, v, lickK) => {
+      const cxAt = (t) => base + v.curl * w * (0.62 * Math.pow(t, 2.3) - 0.16 * Math.sin(t * Math.PI));
+      const hw = (t) => w * 0.5 * (t < 0.24 ? 0.8 + 0.2 * Math.sin((t / 0.24) * Math.PI / 2) : Math.pow((1 - t) / 0.76, 1.3));
+      const side = (s) => {
+        const pts = [];
+        for (let i = 0; i <= 40; i++) {
+          const t = i / 40;
+          pts.push([x + cxAt(t) + s * hw(t), by - h * t, t]);
+        }
+        if (lickK > 0) {
+          v.licks.filter(([ls]) => ls === s).forEach(([, tl, sz]) => {
+            // Between the side's points at t0 and t1, a single apex out and up
+            const t0 = tl - 0.1, t1 = tl + 0.02, k = sz * lickK;
+            const a = pts.findIndex((p) => p[2] >= t0), b = pts.findIndex((p) => p[2] >= t1);
+            pts.splice(a + 1, b - a - 1, [pts[b][0] + s * w * 0.42 * k, by - h * (t1 + 0.11 * k), t1]);
+          });
+        }
+        return pts;
+      };
+      const L = side(-1), R = side(1).reverse();
+      const c = this._flameCtx;
+      c.beginPath();
+      c.moveTo(L[0][0], L[0][1]);
+      L.forEach((p) => c.lineTo(p[0], p[1]));
+      R.forEach((p) => c.lineTo(p[0], p[1]));
+      c.quadraticCurveTo(x + base, by + w * 0.42, L[0][0], L[0][1]);
+      c.closePath();
+    };
+    const LAYERS = [
+      { h: 1, w: 1, lick: 1, top: '#A3180A', mid: '#E2391A', bot: '#F45A1E' },
+      { h: 0.8, w: 0.72, lick: 0.55, top: '#F0601C', mid: '#FF8A20', bot: '#FFA22C' },
+      { h: 0.58, w: 0.48, lick: 0, top: '#FFB531', mid: '#FFCB3C', bot: '#FFE272' },
+      { h: 0.3, w: 0.27, lick: 0, top: '#FFE89A', mid: '#FFF4C8', bot: '#FFFBEA' },
+    ];
+    const sprites = VARIANTS.map((v) => {
+      const c = document.createElement('canvas');
+      c.width = SW; c.height = SH;
+      const x = (this._flameCtx = c.getContext('2d'));
+      LAYERS.forEach((L, i) => {
+        const h = FH * L.h, w = FW * L.w, base = v.curl * FW * 0.04 * i;
+        const g = x.createLinearGradient(0, by - h, 0, by);
+        g.addColorStop(0, L.top); g.addColorStop(0.45, L.mid); g.addColorStop(1, L.bot);
+        x.fillStyle = g;
+        outline(bx, h, w, base, { ...v, curl: v.curl * (1 - i * 0.18) }, L.lick);
+        x.fill();
+        if (i === 0) { x.strokeStyle = 'rgba(96,14,4,0.55)'; x.lineWidth = 2; x.lineJoin = 'round'; x.stroke(); }
+      });
+      return c;
+    });
+    this._flameCtx = null;
+    return (this._flames = { sprites, SW, SH, bx, by, FH });
+  }
+
+  // One flame tongue standing at (x, y), `h` tall, leaning `ang` radians
+  // from straight up (positive leans right), squashed to `wk` of its width.
+  drawFlame(x, y, h, ang, v, alpha = 1, wk = 1) {
+    if (h < 1 || alpha <= 0.01) return;
+    const ctx = this.ctx, F = this.flameSprites(), s = h / F.FH;
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(ang); ctx.scale(s * wk, s);
+    ctx.globalAlpha *= Math.min(1, alpha);
+    ctx.drawImage(F.sprites[((v % 6) + 6) % 6], -F.bx, -F.by);
+    ctx.restore();
+  }
+
+  // A pyro jet roaring up from a nozzle at (x, y): a tall column of flame
+  // between two shorter tongues flaring out, over a hot glow, leaning `ang`.
+  drawFlameJet(x, y, h, k, ts, seed, wk = 0.6, ang = 0) {
+    if (k <= 0.01 || h < 2) return;
+    const ctx = this.ctx, { fire } = this.fireSprites(), r = h * 0.72;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.38 * k;
+    ctx.drawImage(fire[3], x + Math.sin(ang) * h * 0.45 - r, y - h * 0.45 - r, r * 2, r * 2);
+    ctx.restore();
+    const v = Math.floor(ts / 70 + seed * 3);
+    const flick = (j) => 0.86 + 0.14 * Math.sin(ts * 0.045 + seed * 2.1 + j * 1.7);
+    this.drawFlame(x - h * 0.04, y, h * 0.6 * flick(1), ang - 0.2, v + 1, k, wk * 0.9);
+    this.drawFlame(x + h * 0.04, y, h * 0.64 * flick(2), ang + 0.2, v + 3, k, wk * 0.9);
+    this.drawFlame(x, y, h * flick(0), ang + Math.sin(ts * 0.03 + seed) * 0.05, v, k, wk);
+  }
+
+  // A living fire at one spot: a tall middle tongue between two shorter
+  // ones leaning out, each flickering in height and swapping shape on its
+  // own beat, so neighbouring fires never pulse together.
+  drawFireSpot(x, y, size, ts, seed, ang = 0, alpha = 1) {
+    const beat = (k) => 0.78 + 0.22 * Math.sin(ts * (0.021 + k * 0.006) + seed * 2.7 + k * 1.9) * Math.sin(ts * 0.013 + seed + k);
+    const v = (k) => Math.floor(ts / (85 + k * 17) + seed * 3.3 + k * 2);
+    this.drawFlame(x - size * 0.22, y, size * 0.62 * beat(1), ang - 0.32, v(1), alpha, 0.9);
+    this.drawFlame(x + size * 0.22, y, size * 0.58 * beat(2), ang + 0.34, v(2), alpha, 0.9);
+    this.drawFlame(x, y, size * beat(0), ang + Math.sin(ts * 0.009 + seed) * 0.08, v(0), alpha);
+  }
+
+  // A roaring stream of fire from (x0, y0) toward (x1, y1), drawn as solid
+  // cartoon flame: a narrow jet out of a white-hot throat that swells into
+  // rolling billows as it goes, built as four nested flat layers — red
+  // outside, then orange, yellow and a white-hot heart that burns out
+  // before the far end — with tongues licking up off its back, smoke
+  // breaking off the end, a splash of fire round whatever it hits and sparks
+  // spitting off the sides. `k` (0…1) is how hard it's blowing — it grows
+  // the stream out and back — and `w` its width at the mouth. Purely a
+  // function of `ts`, so it needs no state.
   drawFireStream(x0, y0, x1, y1, k, ts, w = 9) {
     if (k <= 0.01) return;
     const ctx = this.ctx, { fire, smoke } = this.fireSprites();
-    const dx = x1 - x0, dy = y1 - y0, D = Math.hypot(dx, dy) || 1, ux = dx / D, uy = dy / D, nx = -uy, ny = ux;
+    const dx = x1 - x0, dy = y1 - y0, D = Math.hypot(dx, dy) || 1, ux = dx / D, uy = dy / D;
+    // The stream's normal, flipped to point up, so "lift" and licks go skyward
+    let nx = -uy, ny = ux;
+    if (ny > 0) { nx = -nx; ny = -ny; }
     const hash = (i) => { const v = Math.sin(i * 91.173 + 3.1) * 43758.5453; return v - Math.floor(v); };
-    const front = Math.min(1, k * 1.8), n = this.lowPower ? 26 : 52;
-    const at = (u, lat, lift) => ({ x: x0 + ux * D * u + nx * lat, y: y0 + uy * D * u + ny * lat - lift });
-    const puff = (img, p, r, a) => { if (a > 0.01 && r > 0.3) { ctx.globalAlpha = Math.min(1, a); ctx.drawImage(img, p.x - r, p.y - r, r * 2, r * 2); } };
+    const front = Math.min(1, k * 1.8), reach = D * front;
+    const at = (u, lat) => ({ x: x0 + ux * D * u + nx * lat, y: y0 + uy * D * u + ny * lat - u * u * w * 1.2 });
     ctx.save();
     // Smoke rolling off the far end, behind the flames
-    for (let i = 0; i < 9; i++) {
-      const u = (ts / 1100 + i / 9) % 1, s = 0.62 + u * 0.5;
-      if (s > front + 0.12) continue;
-      const p = at(s, (hash(i + 40) - 0.5) * w * 2.4, u * w * 3.2 + s * s * w);
-      puff(smoke[i % 3], p, w * (1.1 + u * 1.9), k * 0.36 * Math.sin(u * Math.PI));
+    for (let i = 0; i < 8; i++) {
+      const u = (ts / 1200 + i / 8) % 1, s = 0.6 + u * 0.5;
+      if (s > front + 0.1) continue;
+      const p = at(s, (hash(i + 40) - 0.2) * w * 2.2 + u * w * 2.6);
+      const r = w * (1.2 + u * 2), a = k * 0.42 * Math.sin(u * Math.PI);
+      ctx.globalAlpha = a; ctx.drawImage(smoke[i % 3], p.x - r, p.y - r, r * 2, r * 2);
     }
+    // Heat glow thrown on the air round the jet
     ctx.globalCompositeOperation = 'lighter';
-    // Light thrown on the air round the jet
-    puff(fire[3], at(0.4, 0, 0), D * 0.3 + w * 2.5, 0.16 * k);
-    // The body of the jet: a continuous tongue, rippling along its edges,
-    // white-hot at the throat and burning out to red at the far end
-    const reach = D * front, steps = 14;
-    ctx.globalAlpha = k;
-    const body = ctx.createLinearGradient(x0, y0, x0 + ux * reach, y0 + uy * reach);
-    body.addColorStop(0, 'rgba(255,250,226,0.95)'); body.addColorStop(0.18, 'rgba(255,210,100,0.85)');
-    body.addColorStop(0.5, 'rgba(255,128,40,0.6)'); body.addColorStop(0.8, 'rgba(220,60,24,0.3)'); body.addColorStop(1, 'rgba(160,30,16,0)');
-    ctx.fillStyle = body; ctx.beginPath();
-    for (let side = -1; side <= 1; side += 2) {
-      for (let j = 0; j <= steps; j++) {
-        const t = side < 0 ? j / steps : 1 - j / steps, u = t * front;
-        const half = w * (0.22 + u * 0.95) * (1 + Math.sin(u * 19 - ts * 0.03 + side * 1.3) * 0.18);
-        const p = at(u, side * half, u * u * w * 1.6);
-        if (side < 0 && j === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-      }
-    }
-    ctx.closePath(); ctx.fill();
-    // Turbulence: puffs flowing mouth to target, swelling and cooling
+    const gp = at(front * 0.6, 0), gr = reach * 0.24 + w * 2.2;
+    ctx.globalAlpha = 0.16 * k; ctx.drawImage(fire[2], gp.x - gr, gp.y - gr, gr * 2, gr * 2);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    // The billows: flowing mouth → target, swelling, wobbling and drifting
+    const n = this.lowPower ? 16 : 26, blobs = [];
     for (let i = 0; i < n; i++) {
-      const u = (ts / 520 + i / n + hash(i) * 0.05) % 1;
-      if (u > front) continue;
-      const wob = Math.sin(u * 8 + ts * 0.011 + i * 1.7);
-      const lat = ((hash(i + 7) - 0.5) * 0.8 + wob * 0.3) * w * (0.2 + u * 1.2);
-      const heat = Math.min(7, Math.floor((u * 1.02 + hash(i + 11) * 0.2) * 8));
-      const r = w * (0.5 + u * 1.35) * (0.8 + hash(i + 3) * 0.45);
-      puff(fire[heat], at(u, lat, u * u * w * 1.6), r, k * Math.min(1, u * 14) * (1 - Math.max(0, (u - 0.82) / 0.18)) * 0.7);
+      const u = ((ts / 560 + i / n + hash(i) * 0.06) % 1) * front;
+      const wob = Math.sin(u * 9 + ts * 0.012 + i * 1.7);
+      blobs.push({ u, lat: ((hash(i + 7) - 0.5) * 0.9 + wob * 0.3) * w * u * 1.5, r: w * (0.55 + u * 1.9) * (0.72 + hash(i + 3) * 0.5) });
     }
-    // White-hot throat of the jet
-    for (let j = 0; j < 4; j++) { const u = j * 0.05; puff(fire[1], at(u, 0, 0), w * (0.45 + u * 2), k * 0.9); }
-    puff(fire[2], at(0, 0, 0), w * 1.4, k * 0.7);
-    // Fire splashing round the target once the stream reaches it
+    // A splash of fire bursting round the target once the stream reaches it
+    const splash = [];
     if (front >= 0.98) {
-      for (let j = 0; j < 12; j++) {
-        const v = (ts / 420 + j / 12) % 1, ang = Math.atan2(-uy, -ux) + (hash(j + 60) - 0.5) * 3.4;
-        const p = { x: x1 + Math.cos(ang) * v * w * 2.6, y: y1 + Math.sin(ang) * v * w * 2.2 - v * w * 1.4 };
-        puff(fire[Math.min(7, 2 + Math.floor(v * 5))], p, w * (0.6 + v * 1.1), k * (1 - v) * 0.8);
+      for (let j = 0; j < 9; j++) {
+        const v = (ts / 460 + j / 9) % 1, ang = Math.atan2(-uy, -ux) + (hash(j + 60) - 0.5) * 3.6;
+        splash.push({ x: x1 + Math.cos(ang) * v * w * 2.4, y: y1 + Math.sin(ang) * v * w * 1.8 - v * w * 1.8, r: w * (0.6 + v * 0.7) * (1 - v * 0.55) });
       }
+    }
+    // Each layer is the union of a rippling tapered tube (so the jet never
+    // breaks into beads) and every billow, shrunk by the layer's factor `f`
+    // — and the hot inner layers shrink faster toward the end, so the stream
+    // burns out to red.
+    const layer = (f, fall, c0, c1, billows = true) => {
+      const fu = (u) => f * Math.max(0, 1 - u * fall);
+      const g = ctx.createLinearGradient(x0, y0, x0 + ux * reach, y0 + uy * reach);
+      g.addColorStop(0, c0); g.addColorStop(1, c1);
+      ctx.fillStyle = g; ctx.beginPath();
+      const steps = 16, tube = [];
+      for (let side = -1; side <= 1; side += 2) {
+        for (let j = 0; j <= steps; j++) {
+          const t = side < 0 ? j / steps : 1 - j / steps, u = t * front;
+          const half = w * (0.4 + u * 1.45) * fu(u) * (1 + Math.sin(u * 15 - ts * 0.028 + side * 1.3) * 0.16);
+          tube.push(at(u, side * half));
+        }
+      }
+      // Wound the same way as the billows' arcs (clockwise on screen), or
+      // the non-zero fill would punch holes where they overlap
+      let area = 0;
+      tube.forEach((p, i) => { const q = tube[(i + 1) % tube.length]; area += p.x * q.y - q.x * p.y; });
+      if (area < 0) tube.reverse();
+      tube.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.closePath();
+      if (billows) blobs.forEach((b) => {
+        const r = b.r * fu(b.u);
+        if (r < 1.4) return;
+        const p = at(b.u, b.lat);
+        ctx.moveTo(p.x + r, p.y); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      });
+      if (billows) splash.forEach((s) => {
+        const r = s.r * f * (fall > 0.5 ? 0.6 : 1);
+        if (r > 0.6) { ctx.moveTo(s.x + r, s.y); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); }
+      });
+      ctx.fill('nonzero');
+    };
+    ctx.globalAlpha = Math.min(1, k * 1.6);
+    layer(1.06, 0, '#B0200D', '#8A1A0A');                  // scorched rim
+    layer(1, 0, '#F2541C', '#D0301A');                     // red body
+    layer(0.78, 0.2, '#FF9324', '#FF6E1E');                // orange
+    layer(0.56, 0.5, '#FFD848', '#FFA632');                // yellow heart
+    layer(0.3, 0.85, '#FFFCEB', '#FFE7A0', false);         // white-hot core, one smooth line
+    // Tongues licking up off the back of the stream, leaning back toward
+    // the mouth as the jet rushes on
+    const lean = Math.atan2(-ux, uy) * 0.35;
+    for (let j = 0; j < (this.lowPower ? 3 : 5); j++) {
+      const u = (0.24 + j * 0.15 + (ts / 900) % 0.15) * front;
+      if (u > front * 0.94) continue;
+      const half = w * (0.4 + u * 1.45) * (1 + Math.sin(u * 15 - ts * 0.028 - 1.3) * 0.16);
+      const p = at(u, half * 0.8);
+      this.drawFlame(p.x, p.y, w * (1.1 + u * 1.6) * (0.75 + hash(j + 30) * 0.4), lean, Math.floor(ts / 90 + j * 2), k, 0.85);
     }
     // Sparks spitting off the sides
     ctx.globalAlpha = 1; ctx.lineCap = 'round';
+    ctx.globalCompositeOperation = 'lighter';
     for (let j = 0; j < 12; j++) {
       const u = (ts / 380 + j / 12 + hash(j + 90) * 0.2) % 1;
       if (u > front) continue;
-      const p = at(u * 1.1, (hash(j + 70) - 0.5) * w * 3.6 * u, u * u * 16);
-      ctx.strokeStyle = `rgba(255,${190 + Math.round(hash(j + 80) * 60)},120,${k * (1 - u)})`; ctx.lineWidth = 1.1;
+      const p = at(u * 1.1, (hash(j + 70) - 0.5) * w * 3.6 * u);
+      ctx.strokeStyle = `rgba(255,${190 + Math.round(hash(j + 80) * 60)},120,${k * (1 - u)})`; ctx.lineWidth = 1.2;
       ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - ux * 5, p.y - uy * 5 + 1); ctx.stroke();
     }
     ctx.lineCap = 'butt';
     ctx.restore();
   }
 
-  // Rider and bike on fire. Flames lick off the bike, the rider's body and
-  // his helmet — bent back by the rush of air and up by their own heat —
-  // over a hot glow, following the bike through every flip. Burning scraps
-  // shed into the air behind keep flaring and cooling as the bike flies on
+  // Rider and bike on fire. Solid flame tongues stream off the bike, the
+  // rider's body and his helmet — bent back by the rush of air and up by
+  // their own heat — over a hot glow, following the bike through every flip,
+  // each tongue flickering and changing shape on its own beat. Burning scraps
+  // shed into the air behind keep flaring and dying as the bike flies on
   // ('flame' particles, in world space), with sparks and a trail of smoke.
   drawBurning(x, y, ts) {
     const ctx = this.ctx, k = Math.min(1, (ts - this.burnT) / 300), { fire } = this.fireSprites();
@@ -1386,14 +1564,15 @@ export class BikeGame {
       .map(([px, py, sz]) => ({ x: (px * c - py * s) * S, y: (px * s + py * c) * S, sz }));
     const sp = Math.hypot(this.bvx, this.bvy) || 1, bx = -this.bvx / sp, by = -this.bvy / sp;
     const dx = bx * 0.8, dy = by * 0.8 - 0.75, dl = Math.hypot(dx, dy) || 1;
-    const ux = dx / dl, uy = dy / dl, nx = -uy, ny = ux;          // flame direction + its normal
+    // The way the flames stream, as an angle from straight up
+    const lean = Math.atan2(dx / dl, -dy / dl);
 
     if (this.phase === 'flying') {
-      for (let i = 0; i < (this.lowPower ? 3 : 5); i++) {
+      for (let i = 0; i < (this.lowPower ? 2 : 4); i++) {
         const p = pts[(Math.random() * pts.length) | 0];
         this.particles.push({ type: 'flame', x: this.bx + p.x + (Math.random() - 0.5) * 6, y: y + p.y + (Math.random() - 0.5) * 6,
           vx: this.bvx * 0.62 + (Math.random() - 0.5) * 0.7, vy: this.bvy * 0.5 - 0.8 - Math.random() * 0.7,
-          life: 1, decay: 0.045 + Math.random() * 0.035, r: (7 + Math.random() * 6) * p.sz, rot: 0, spin: 0 });
+          life: 1, decay: 0.05 + Math.random() * 0.04, r: (6 + Math.random() * 5) * p.sz, rot: lean + (Math.random() - 0.5) * 0.5, spin: 0, v: (Math.random() * 6) | 0 });
       }
       if (Math.random() < 0.35) {
         const p = pts[(Math.random() * pts.length) | 0];
@@ -1406,54 +1585,29 @@ export class BikeGame {
       }
     }
 
-    // A flame tongue from (bx0, by0): wide at the root, licking out along
-    // the flame direction to a swaying tip; `f` shrinks it for inner layers
-    const tongue = (bx0, by0, len, w, sway, f) => {
-      const L = len * (0.45 + f * 0.55), W = w * f, sw = sway * f;
-      const tipX = bx0 + ux * L + nx * sw, tipY = by0 + uy * L + ny * sw;
-      ctx.beginPath();
-      ctx.moveTo(bx0 + nx * W, by0 + ny * W);
-      ctx.bezierCurveTo(bx0 + ux * L * 0.35 + nx * W * 1.35, by0 + uy * L * 0.35 + ny * W * 1.35,
-        bx0 + ux * L * 0.72 + nx * (W * 0.35 + sw * 0.6), by0 + uy * L * 0.72 + ny * (W * 0.35 + sw * 0.6), tipX, tipY);
-      ctx.bezierCurveTo(bx0 + ux * L * 0.72 + nx * (sw * 0.6 - W * 0.3), by0 + uy * L * 0.72 + ny * (sw * 0.6 - W * 0.3),
-        bx0 + ux * L * 0.35 - nx * W * 1.35, by0 + uy * L * 0.35 - ny * W * 1.35, bx0 - nx * W, by0 - ny * W);
-      ctx.quadraticCurveTo(bx0 - ux * W * 0.9, by0 - uy * W * 0.9, bx0 + nx * W, by0 + ny * W);
-      ctx.closePath();
-    };
     ctx.save();
+    // Heat glow round the whole blaze
     const mx = pts.reduce((t, p) => t + p.x, 0) / pts.length, my = pts.reduce((t, p) => t + p.y, 0) / pts.length;
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.28 * k; ctx.drawImage(fire[4], x + mx - 70, y + my - 70, 140, 140);
+    ctx.globalAlpha = 0.3 * k; ctx.drawImage(fire[3], x + mx - 46, y + my - 52, 92, 92);
     ctx.globalCompositeOperation = 'source-over';
-    const flames = [];
-    pts.forEach((p, i) => {
-      // Two tongues from each spot, out of step, so the fire never repeats
-      for (let t = 0; t < 2; t++) {
-        const ph = ts * (0.029 + t * 0.011) + i * 1.9 + t * 2.6;
-        const flick = 0.72 + 0.28 * Math.sin(ph) * Math.sin(ph * 0.53 + 1);
-        const w = (4.5 - t * 1.2) * p.sz * k, ox = (t ? -1 : 1) * w * 0.45;
-        flames.push({ bx0: x + p.x + nx * ox, by0: y + p.y + ny * ox, len: (26 + (i % 3) * 7 - t * 6) * p.sz * flick * k, w,
-          sway: Math.sin(ts * 0.022 + i * 2.3 + t * 1.4) * 4 * p.sz });
-      }
-    });
-    // Layered like real flame: deep red-orange outside, orange, then a
-    // yellow heart and a white-hot root that glow
-    [[1, 'rgba(214,52,22,', 'rgba(255,120,36,', 0.88], [0.68, 'rgba(255,128,34,', 'rgba(255,196,80,', 0.92]].forEach(([f, c0, c1, a]) => {
-      flames.forEach((q) => {
-        const g = ctx.createLinearGradient(q.bx0, q.by0, q.bx0 + ux * q.len * f, q.by0 + uy * q.len * f);
-        g.addColorStop(0, `${c1}${a * k})`); g.addColorStop(0.55, `${c0}${a * k})`); g.addColorStop(1, `${c0}0)`);
-        ctx.fillStyle = g; tongue(q.bx0, q.by0, q.len, q.w, q.sway, f); ctx.fill();
+    ctx.globalAlpha = 1;
+    // Two tongues from each spot, out of step, so the fire never repeats;
+    // the short back ones first, the tall front ones over them
+    for (let t = 1; t >= 0; t--) {
+      pts.forEach((p, i) => {
+        const ph = ts * (0.026 + t * 0.012) + i * 1.9 + t * 2.6;
+        const flick = 0.74 + 0.26 * Math.sin(ph) * Math.sin(ph * 0.53 + 1);
+        const h = (30 + (i % 3) * 8 - t * 9) * p.sz * flick * k;
+        const ang = lean + Math.sin(ts * 0.02 + i * 2.3 + t * 1.4) * 0.16 + (t ? -0.35 : 0.08) * (i % 2 ? 1 : -1);
+        this.drawFlame(x + p.x, y + p.y + 2, h, ang, Math.floor(ts / (80 + t * 25) + i * 2.2 + t * 3), k, 0.95 - t * 0.15);
       });
-    });
+    }
+    // White-hot roots where the fire grips
     ctx.globalCompositeOperation = 'lighter';
-    flames.forEach((q) => {
-      const g = ctx.createLinearGradient(q.bx0, q.by0, q.bx0 + ux * q.len * 0.4, q.by0 + uy * q.len * 0.4);
-      g.addColorStop(0, `rgba(255,250,220,${0.95 * k})`); g.addColorStop(0.6, `rgba(255,220,120,${0.6 * k})`); g.addColorStop(1, 'rgba(255,200,100,0)');
-      ctx.fillStyle = g; tongue(q.bx0, q.by0, q.len, q.w, q.sway, 0.4); ctx.fill();
-    });
     pts.forEach((p) => {
-      const r = 5 * p.sz;
-      ctx.globalAlpha = 0.6 * k; ctx.drawImage(fire[1], x + p.x - r, y + p.y - r, r * 2, r * 2);
+      const r = 3.6 * p.sz;
+      ctx.globalAlpha = 0.55 * k; ctx.drawImage(fire[1], x + p.x - r, y + p.y - r, r * 2, r * 2);
     });
     ctx.restore();
   }
@@ -1489,6 +1643,66 @@ export class BikeGame {
       ctx.strokeStyle = rim; ctx.lineWidth = Math.max(0.6, size * 0.05);
       ctx.beginPath(); lead(-1); lead(1); ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  // A soaring vulture seen from below, gliding on a circle: broad, plank-
+  // like wings held flat with a slight lift, the big primaries splayed into
+  // six separate fingers at each tip, a pale band along the flight feathers
+  // catching the moon, a short wedge tail, and a small bald head on a white
+  // ruff. `dir` (-1…1) is which way it's heading round the circle — it
+  // banks into the turn, one wing dipping and foreshortening — and `phase`
+  // drives an occasional slow wingbeat between long glides.
+  drawVulture(x, y, size, dir, phase) {
+    const ctx = this.ctx;
+    const cyc = phase % 12, beat = cyc < 1.6 ? Math.sin((cyc / 1.6) * Math.PI * 2) * 0.12 : 0;
+    const face = dir < 0 ? -1 : 1, bank = dir * 0.22;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(bank); ctx.scale(face, 1);
+    const DARK = '#1B1412', MID = '#3A2D27', BAND = 'rgba(168,160,150,0.55)';
+    // One wing: `s` = +1 forward (toward the head side) is the near one;
+    // the far one foreshortens with the bank
+    const wing = (s) => {
+      const span = size * (s > 0 ? 1 : 0.92) * (1 - Math.abs(dir) * 0.12 * (s < 0 ? 1 : 0));
+      const lift = -size * (0.08 + beat) * s * s;
+      ctx.beginPath();
+      ctx.moveTo(0, -size * 0.1);
+      ctx.quadraticCurveTo(span * 0.45, -size * 0.2 + lift, span * 0.82, -size * 0.16 + lift * 1.4);
+      // Six fingered primaries at the tip, splayed apart
+      for (let fgr = 0; fgr < 6; fgr++) {
+        const a = -0.55 + fgr * 0.2, L = size * (0.3 - Math.abs(fgr - 2.2) * 0.025);
+        const bx = span * (0.82 - fgr * 0.012), by = -size * (0.16 - fgr * 0.07) + lift * 1.4;
+        ctx.lineTo(bx + Math.cos(a) * L, by + Math.sin(a) * L);
+        ctx.lineTo(bx + Math.cos(a) * L * 0.15, by + Math.sin(a) * L * 0.15 + size * 0.045);
+      }
+      ctx.quadraticCurveTo(span * 0.5, size * 0.3 + lift, 0, size * 0.22);
+      ctx.closePath();
+    };
+    [1, -1].forEach((s) => {
+      ctx.save(); ctx.scale(s, 1);
+      wing(s);
+      const wg = ctx.createLinearGradient(0, -size * 0.2, 0, size * 0.3);
+      wg.addColorStop(0, MID); wg.addColorStop(1, DARK);
+      ctx.fillStyle = wg; ctx.fill();
+      // The pale band of flight feathers along the back half of the wing
+      ctx.save(); wing(s); ctx.clip();
+      ctx.strokeStyle = BAND; ctx.lineWidth = size * 0.1;
+      ctx.beginPath(); ctx.moveTo(size * 0.06, size * 0.17); ctx.quadraticCurveTo(size * 0.5, size * 0.2, size * 0.8, size * 0.02); ctx.stroke();
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(190,206,236,0.35)'; ctx.lineWidth = Math.max(0.6, size * 0.035);
+      ctx.beginPath(); ctx.moveTo(0, -size * 0.1); ctx.quadraticCurveTo(size * 0.45, -size * 0.2, size * 0.8, -size * 0.17); ctx.stroke();
+      ctx.restore();
+    });
+    // Body and wedge tail
+    ctx.fillStyle = DARK;
+    ctx.beginPath(); ctx.ellipse(0, size * 0.04, size * 0.12, size * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-size * 0.1, size * 0.26); ctx.lineTo(-size * 0.14, size * 0.5); ctx.lineTo(size * 0.14, size * 0.5); ctx.lineTo(size * 0.1, size * 0.26); ctx.closePath(); ctx.fill();
+    // White ruff and the bald, hook-beaked head
+    ctx.fillStyle = '#D9D2C8';
+    ctx.beginPath(); ctx.ellipse(0, -size * 0.2, size * 0.1, size * 0.07, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#B88A80';
+    ctx.beginPath(); ctx.ellipse(0, -size * 0.31, size * 0.06, size * 0.085, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#E8DCC0';
+    ctx.beginPath(); ctx.moveTo(-size * 0.03, -size * 0.38); ctx.quadraticCurveTo(0, -size * 0.47, size * 0.03, -size * 0.38); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
 
@@ -1777,30 +1991,36 @@ export class BikeGame {
     };
 
     const wing = (sx, sy, k, near) => {
-      const E = { x: sx - 4, y: sy - 10 * f * k - 1.5 };
-      const Wr = { x: sx + 5, y: sy - 21 * f * k - 3 };
+      // On the downstroke the wing turns toward us edge-on, so its fingers
+      // close up (foreshortened); at the top of the beat they fan wide open
+      const sp = 0.62 + 0.38 * (0.5 + 0.5 * f);
+      const E = { x: sx - 3, y: sy - 12 * f * k - 2 };
+      const Wr = { x: sx + 7, y: sy - 25 * f * k - 4 };
       const tips = [
-        { x: Wr.x + 11, y: Wr.y - 10 * fl * k - 2 },
-        { x: Wr.x - 5, y: Wr.y - 15 * fl * k - 6 },
-        { x: Wr.x - 20, y: Wr.y - 10 * fl * k - 2 },
-        { x: Wr.x - 31, y: Wr.y - 3 * fl * k + 4 },
+        { x: Wr.x + 15 * sp, y: Wr.y - 12 * fl * k - 1 },
+        { x: Wr.x + 1 * sp, y: Wr.y - 19 * fl * k - 7 },
+        { x: Wr.x - 15 * sp, y: Wr.y - 15 * fl * k - 5 },
+        { x: Wr.x - 28 * sp, y: Wr.y - 8 * fl * k },
+        { x: Wr.x - 37 * sp, y: Wr.y - 2 * fl * k + 6 },
       ];
-      const root = { x: sx - 19, y: sy + 5 };
-      // The scalloped trailing edge, finger tip to finger tip and back to the body
+      const root = { x: sx - 21, y: sy + 5 };
+      // The deeply scalloped trailing edge, finger tip to finger tip and back
+      // to the body: each span of membrane sags in toward the wrist
       const trailing = () => {
         for (let i = 1; i < tips.length; i++) {
           const a = tips[i - 1], b = tips[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-          ctx.quadraticCurveTo(mx + (Wr.x - mx) * 0.34, my + (Wr.y - my) * 0.34, b.x, b.y);
+          ctx.quadraticCurveTo(mx + (Wr.x - mx) * 0.46, my + (Wr.y - my) * 0.46, b.x, b.y);
         }
-        ctx.quadraticCurveTo((tips[3].x + root.x) / 2 + 3, (tips[3].y + root.y) / 2 - 2, root.x, root.y);
+        const last = tips[tips.length - 1];
+        ctx.quadraticCurveTo((last.x + root.x) / 2 + 4, (last.y + root.y) / 2 - 3, root.x, root.y);
       };
       const edge = () => {
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.lineTo(tips[0].x, tips[0].y);
         trailing(); ctx.closePath();
       };
-      const mg = ctx.createRadialGradient(Wr.x, Wr.y, 1, Wr.x, Wr.y, 36);
-      if (near) { mg.addColorStop(0, 'rgba(112,10,18,0.97)'); mg.addColorStop(0.5, 'rgba(172,32,30,0.94)'); mg.addColorStop(1, 'rgba(250,122,58,0.88)'); }
-      else { mg.addColorStop(0, 'rgba(62,5,10,0.97)'); mg.addColorStop(1, 'rgba(132,28,26,0.92)'); }
+      const mg = ctx.createRadialGradient(Wr.x, Wr.y, 1, Wr.x, Wr.y, 40);
+      if (near) { mg.addColorStop(0, 'rgba(88,6,16,0.98)'); mg.addColorStop(0.42, 'rgba(150,22,30,0.95)'); mg.addColorStop(0.78, 'rgba(206,56,38,0.92)'); mg.addColorStop(1, 'rgba(255,128,62,0.9)'); }
+      else { mg.addColorStop(0, 'rgba(50,4,10,0.98)'); mg.addColorStop(1, 'rgba(118,22,24,0.94)'); }
       edge(); ctx.fillStyle = mg; ctx.fill();
       ctx.save(); edge(); ctx.clip();
       // Creases in the shade of each finger and the arm
@@ -1828,8 +2048,11 @@ export class BikeGame {
       ctx.strokeStyle = INK; ctx.lineWidth = 0.45; edge(); ctx.stroke();
       // Bones: a thick arm, then tapering fingers, lit along the top
       ctx.strokeStyle = near ? '#3C060A' : '#22030A';
-      ctx.lineWidth = 2.2; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.stroke();
-      ctx.lineWidth = 1.05; ctx.beginPath(); tips.forEach((t) => { ctx.moveTo(Wr.x, Wr.y); ctx.lineTo(t.x, t.y); }); ctx.stroke();
+      ctx.lineWidth = 2.8; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.stroke();
+      tips.forEach((t, i) => {
+        ctx.lineWidth = 1.5 - i * 0.18; ctx.beginPath(); ctx.moveTo(Wr.x, Wr.y);
+        ctx.quadraticCurveTo((Wr.x + t.x) / 2 + (t.y - Wr.y) * 0.06, (Wr.y + t.y) / 2 - (t.x - Wr.x) * 0.06, t.x, t.y); ctx.stroke();
+      });
       if (near) {
         ctx.strokeStyle = 'rgba(255,176,156,0.5)'; ctx.lineWidth = 0.5;
         ctx.beginPath(); ctx.moveTo(sx, sy - 0.9); ctx.lineTo(E.x, E.y - 0.9); ctx.lineTo(Wr.x, Wr.y - 0.9); ctx.lineTo(tips[0].x, tips[0].y - 0.4); ctx.stroke();
@@ -1853,7 +2076,7 @@ export class BikeGame {
     const tail = [];
     for (let i = 0; i <= 18; i++) {
       const t = i / 18;
-      tail.push({ x: -11 - t * 40, y: 1.2 + t * 4.5 + Math.sin(t * 3.4 + phase * 0.55) * 3.8 * t, w: 3.4 * Math.pow(1 - t, 0.85) + 0.35 });
+      tail.push({ x: -11 - t * 34, y: 1.2 + t * 4 + Math.sin(t * 3.4 + phase * 0.55) * 3.4 * t, w: 4.1 * Math.pow(1 - t, 0.95) + 0.4 });
     }
     const tt = tube(tail);
     outline(tt.top, tt.bot); ctx.fillStyle = skin(-3, 9); ctx.fill();
@@ -1868,7 +2091,7 @@ export class BikeGame {
       for (let j = 1; j < 16; j += 2) { const len = 2.3 * (1 - j / 18) + 0.5; edgeSpike(tt.top[j], len, len * 0.42); }
     });
     const tp = tail[18], tq = tail[16], ta = Math.atan2(tp.y - tq.y, tp.x - tq.x);
-    ctx.save(); ctx.translate(tp.x, tp.y); ctx.rotate(ta);
+    ctx.save(); ctx.translate(tp.x, tp.y); ctx.rotate(ta); ctx.scale(1.35, 1.35);
     ctx.beginPath(); ctx.moveTo(-0.6, 0); ctx.quadraticCurveTo(1.2, -3.6, 2.4, -3.8); ctx.lineTo(6.6, 0); ctx.lineTo(2.4, 3.8); ctx.quadraticCurveTo(1.2, 3.6, -0.6, 0); ctx.closePath();
     ctx.fillStyle = '#6C0E13'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
     ctx.strokeStyle = 'rgba(255,190,150,0.35)'; ctx.lineWidth = 0.35; ctx.beginPath(); ctx.moveTo(0.4, 0); ctx.lineTo(5.6, 0); ctx.stroke();
@@ -1876,9 +2099,9 @@ export class BikeGame {
 
     // Body: scaled crimson over gold belly plates
     const torso = () => {
-      ctx.beginPath(); ctx.moveTo(-12.5, -1.4);
-      ctx.bezierCurveTo(-6, -5.6, 2, -6.8, 7.5, -5.4); ctx.bezierCurveTo(11, -4.4, 12.6, -2, 12.4, 1);
-      ctx.bezierCurveTo(11.8, 4.8, 6, 6.8, 0, 6.2); ctx.bezierCurveTo(-5, 5.8, -10.5, 4.6, -13.4, 2.2); ctx.closePath();
+      ctx.beginPath(); ctx.moveTo(-12.5, -1.6);
+      ctx.bezierCurveTo(-6, -6.4, 2, -7.8, 7.8, -6.2); ctx.bezierCurveTo(11.6, -5, 13.6, -2, 13.2, 1.4);
+      ctx.bezierCurveTo(12.4, 5.6, 6, 7.8, 0, 7); ctx.bezierCurveTo(-5, 6.4, -10.5, 5, -13.4, 2.4); ctx.closePath();
     };
     torso(); ctx.fillStyle = skin(-6.5, 6.5); ctx.fill();
     ctx.save(); torso(); ctx.clip();
@@ -1919,7 +2142,7 @@ export class BikeGame {
     const neck = [];
     for (let i = 0; i <= 8; i++) {
       const t = i / 8, u = 1 - t;
-      neck.push({ x: u * u * 7.2 + 2 * u * t * 15 + t * t * 20.6, y: u * u * -2.6 + 2 * u * t * -9.6 + t * t * -10.2, w: 3 - t * 1.35 });
+      neck.push({ x: u * u * 7.2 + 2 * u * t * 15 + t * t * 20.6, y: u * u * -2.6 + 2 * u * t * -9.6 + t * t * -10.2, w: 3.6 - t * 1.75 });
     }
     // The neck runs toward the head, so its upper edge is the tube's `bot`
     const nt = tube(neck), crest = nt.bot, throat = nt.top;
@@ -1946,7 +2169,7 @@ export class BikeGame {
     }
 
     // Head, tipped down a touch at the end of the neck
-    ctx.save(); ctx.translate(20.6, -10.3); ctx.rotate(0.08);
+    ctx.save(); ctx.translate(20.6, -10.3); ctx.rotate(0.08); ctx.scale(1.16, 1.16);
     const horn = (dx, dy, k2, near) => {
       ctx.beginPath();
       ctx.moveTo(0.6 + dx, -2.5 + dy);
@@ -2023,12 +2246,12 @@ export class BikeGame {
     // Spines down the back, then moonlight along the top edge and the
     // stadium's warm light under the belly
     spikes(() => {
-      [[6.2, -5.7, 2.5], [2.7, -6.3, 2.8], [-0.8, -6.1, 2.6], [-4.3, -5.3, 2.3], [-7.8, -4.1, 2], [-11, -2.5, 1.6]].forEach(([px, py, l]) => spike(px, py, -0.42, -0.91, l, l * 0.4));
+      [[6.2, -6.4, 3.2], [2.7, -7.1, 3.6], [-0.8, -6.9, 3.4], [-4.3, -6, 3], [-7.8, -4.7, 2.6], [-11, -2.9, 2]].forEach(([px, py, l]) => spike(px, py, -0.42, -0.91, l, l * 0.46));
     });
     ctx.strokeStyle = 'rgba(255,214,206,0.5)'; ctx.lineWidth = 0.55;
-    ctx.beginPath(); ctx.moveTo(-12.4, -1.7); ctx.bezierCurveTo(-6, -5.9, 2, -7.1, 7.5, -5.7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-12.4, -1.9); ctx.bezierCurveTo(-6, -6.7, 2, -8.1, 7.8, -6.5); ctx.stroke();
     ctx.strokeStyle = 'rgba(255,170,96,0.4)'; ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.moveTo(-10, 4.6); ctx.bezierCurveTo(-4, 6.4, 6, 6.8, 11.6, 3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-10, 5); ctx.bezierCurveTo(-4, 7, 6, 7.6, 12.2, 3.6); ctx.stroke();
     if (inner > 0) {
       ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.4 * (0.85 + Math.sin(ts * 0.017) * 0.15);
       ctx.drawImage(fire[3], 7 - 6, 2 - 6, 12, 12); ctx.restore();
@@ -2061,15 +2284,24 @@ export class BikeGame {
     }
     ctx.lineTo(W + 10, top + trackH); ctx.closePath(); ctx.fill();
 
-    // Sheen along the groomed crest, and tyre grooves worn into the racing line
-    ctx.fillStyle = 'rgba(255,222,176,0.09)'; ctx.fillRect(0, top + 3, W, 3);
-    ctx.strokeStyle = 'rgba(40,24,10,0.32)'; ctx.lineWidth = 2;
-    ctx.setLineDash([30, 14]);
-    [0.32, 0.46, 0.66].forEach((f, i) => {
-      ctx.lineDashOffset = this.camX * (0.94 + i * 0.03);
-      ctx.beginPath(); ctx.moveTo(0, top + trackH * f); ctx.lineTo(W, top + trackH * f); ctx.stroke();
+    // The groomed crest catching the floodlights along its bumps, and
+    // knobby tyre ruts pressed into the racing line
+    ctx.strokeStyle = 'rgba(255,226,182,0.3)'; ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let px = -5; px <= W + 10; px += 4) {
+      const wx = px + this.camX;
+      const bump = Math.sin(wx * 0.11) * 2 + Math.sin(wx * 0.068) * 3 + Math.sin(wx * 0.23);
+      if (px === -5) ctx.moveTo(px, top + bump + 1); else ctx.lineTo(px, top + bump + 1);
+    }
+    ctx.stroke();
+    const tread = this.treadStrip();
+    [[0.3, 0.98, 0.95], [0.5, 1, 0.75], [0.7, 1.02, 0.85]].forEach(([f, sp, a]) => {
+      const y = top + trackH * f - tread.h / 2;
+      let x = -(((this.camX * sp) % tread.w) + tread.w) % tread.w;
+      ctx.globalAlpha = a;
+      for (; x < W; x += tread.w) ctx.drawImage(tread.canvas, x, y, tread.w, tread.h);
     });
-    ctx.setLineDash([]); ctx.lineDashOffset = 0;
+    ctx.globalAlpha = 1;
 
     // Loose clumps kicked up along the racing line, scrolling with the track
     const clumpSpan = W + 80;
@@ -2127,6 +2359,29 @@ export class BikeGame {
     ctx.fillStyle = vig; ctx.fillRect(0, H * 0.86, W, H * 0.14);
   }
 
+  // One tile of a knobby tyre's rut in the dirt, baked once: a pressed-down
+  // groove, shaded along its top lip and lit along the bottom one, with the
+  // tread's chevron knobs stamped across it. Tiled along the racing line.
+  treadStrip() {
+    if (this._tread && this._tread.dpr === this.dpr) return this._tread;
+    const w = 48, h = 7, dpr = this.dpr, c = document.createElement('canvas');
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    const t = c.getContext('2d');
+    t.setTransform(dpr, 0, 0, dpr, 0, 0);
+    t.fillStyle = 'rgba(46,28,12,0.26)'; t.fillRect(0, 1, w, h - 2);
+    t.fillStyle = 'rgba(30,18,8,0.32)'; t.fillRect(0, 1, w, 1);
+    t.fillStyle = 'rgba(255,224,176,0.16)'; t.fillRect(0, h - 1.5, w, 1);
+    t.fillStyle = 'rgba(36,22,9,0.42)';
+    t.beginPath();
+    for (let x = 0; x < w; x += 6) {
+      t.moveTo(x, 1.6); t.lineTo(x + 2.4, 1.6); t.lineTo(x + 3.6, h / 2); t.lineTo(x + 2.4, h - 1.6); t.lineTo(x, h - 1.6); t.lineTo(x + 1.2, h / 2); t.closePath();
+    }
+    t.fill();
+    t.fillStyle = 'rgba(255,226,180,0.12)';
+    for (let x = 3; x < w; x += 6) t.fillRect(x, h / 2 - 0.5, 1.2, 1);
+    return (this._tread = { canvas: c, w, h, dpr });
+  }
+
   // Bakes each ground-texture row (the fine-grain speckle loop plus the
   // bigger pebble/patch/weed loop) into its own small offscreen canvas, one
   // tileable pattern per row exactly `span` pixels wide (the same period the
@@ -2159,12 +2414,23 @@ export class BikeGame {
       const span = W + 120;
       const bandTop = rowY - 3, bandH = groundH / 14 + 6;
       makeBand(span, bandTop, bandH, speed, (bctx) => {
-        for (let i = 0; i < 26; i++) {
-          const seed = row * 53 + i;
-          const cx = (seed * 63.1) % span;
-          const cy = (rowY - bandTop) + (Math.sin(seed * 8.3) * 0.5 + 0.5) * (groundH / 14);
-          bctx.fillStyle = seed % 3 === 0 ? 'rgba(30,17,7,0.3)' : 'rgba(150,112,60,0.22)';
-          bctx.beginPath(); bctx.arc(cx, cy, 0.6 + (0.5 + rt) * 0.8, 0, Math.PI * 2); bctx.fill();
+        // Dense grit: dark specks and lit grains, plus tiny pebbles that
+        // each get a lit top and a shadow under them
+        const n = Math.round(span / 6);
+        for (let i = 0; i < n; i++) {
+          const seed = row * 53 + i * 1.37;
+          const h1 = Math.sin(seed * 12.9898) * 43758.5453, h2 = Math.sin(seed * 78.233) * 12543.731;
+          const fx = h1 - Math.floor(h1), fy = h2 - Math.floor(h2);
+          const cx = fx * span, cy = (rowY - bandTop) + fy * (groundH / 14);
+          const r = 0.45 + (0.5 + rt) * (0.35 + ((i * 7) % 5) * 0.12);
+          if (i % 9 === 0) {
+            bctx.fillStyle = 'rgba(20,11,4,0.35)'; bctx.beginPath(); bctx.ellipse(cx + r * 0.3, cy + r * 0.6, r * 1.5, r * 0.7, 0, 0, Math.PI * 2); bctx.fill();
+            bctx.fillStyle = `rgb(${120 + (i % 4) * 14},${92 + (i % 3) * 10},${62 + (i % 5) * 6})`; bctx.beginPath(); bctx.arc(cx, cy, r * 1.2, 0, Math.PI * 2); bctx.fill();
+            bctx.fillStyle = 'rgba(255,236,204,0.35)'; bctx.beginPath(); bctx.arc(cx - r * 0.35, cy - r * 0.4, r * 0.5, 0, Math.PI * 2); bctx.fill();
+          } else {
+            bctx.fillStyle = i % 3 === 0 ? 'rgba(28,16,6,0.34)' : i % 3 === 1 ? 'rgba(168,126,72,0.26)' : 'rgba(214,170,112,0.16)';
+            bctx.beginPath(); bctx.arc(cx, cy, r, 0, Math.PI * 2); bctx.fill();
+          }
         }
       });
     }
@@ -2182,10 +2448,11 @@ export class BikeGame {
       makeBand(span, bandTop, bandH, speed, (bctx) => {
         for (let i = 0; i < 26; i++) {
           const seed = row * 37 + i;
-          const x0 = (seed * 91.7) % span;
+          const hx = Math.sin(seed * 12.9898) * 43758.5453, hk = Math.sin(seed * 78.233) * 24634.6345;
+          const x0 = (hx - Math.floor(hx)) * span;
           const cy = (rowY - bandTop) + (Math.sin(seed * 12.9) * 0.5 + 0.5) * groundH * 0.1 * (0.5 + rt);
           const size = 1.6 + rt * 4.4;
-          const kind = seed % 8;
+          const kind = Math.floor((hk - Math.floor(hk)) * 8);
           const reach = size * 8;
           const paint = (cx) => {
             if (kind === 5 || kind === 7) {
@@ -2264,13 +2531,16 @@ export class BikeGame {
     });
   }
 
-  // ── Crowd (precomputed once; seats use fractional x positions so the layout
-  // stays valid across resizes without regenerating — regenerating each frame
-  // or each resize would make the crowd flicker/reshuffle) ─────────────────
+  // ── Crowd (seats use fractional x positions so the layout stays valid as
+  // the stand scrolls; it's only rebuilt when the stand's size class
+  // changes — see ensureCrowdModel — never per frame, so it doesn't shuffle)
   // Two decks: a hazy upper tier above the LED balcony ribbon and a closer
   // lower bowl below it. `depth` (0 = farthest, 1 = front row) drives fan
-  // size and detail; `t` is the row's position within its own deck.
-  buildCrowd() {
+  // size and detail; `t` is the row's position within its own deck. The
+  // number of rows and seats comes from the stand's size on screen (see
+  // standGeom), so a phone gets fewer, bigger fans you can make out as
+  // people instead of a fine noise of tiny ones.
+  buildCrowd(g) {
     const rand = Math.random;
     const pick = (list) => {
       let roll = rand() * list.reduce((s, item) => s + item[1], 0);
@@ -2285,13 +2555,14 @@ export class BikeGame {
     const CAPS = ['#2EE59D', '#1E3A66', '#FFD23F', '#FF5C7A', '#E8EEF6', '#1A1F2B'];
     const FLAGS = [['#2EE59D', 3], ['#FFD23F', 2], ['#E8EEF6', 2], ['#FF5C7A', 1]];
     const SCARVES = [[['#2EE59D', '#F4F7FB'], 3], [['#14223F', '#2EE59D'], 2], [['#FFD23F', '#14223F'], 2], [['#FF5C7A', '#F4F7FB'], 1]];
+    const STRIPES = [['#F4F7FB', 3], ['#14223F', 2], ['#FFD23F', 1], ['#2EE59D', 1]];
 
     this.aisleFracs = [0.33, 0.67];
     const inAisle = (f) => this.aisleFracs.some((a) => Math.abs(f - a) < 0.016);
 
     const DECKS = [
-      { deck: 'upper', rows: 7, depthFrom: 0.08, depthTo: 0.34 },
-      { deck: 'lower', rows: 9, depthFrom: 0.44, depthTo: 1 },
+      { deck: 'upper', rows: g.upperRows, depthFrom: 0.08, depthTo: 0.34 },
+      { deck: 'lower', rows: g.lowerRows, depthFrom: 0.44, depthTo: 1 },
     ];
     this.crowdRows = [];
     DECKS.forEach(({ deck, rows, depthFrom, depthTo }) => {
@@ -2299,19 +2570,23 @@ export class BikeGame {
         const t = r / (rows - 1);
         const depth = depthFrom + (depthTo - depthFrom) * t;
         const size = 2.2 + depth * 6.3;
-        // Seats packed ~1.4 fan-widths apart (at a 1300px-wide canvas) so the
-        // stands read as a full house rather than scattered pins.
-        const count = Math.round(1430 / (size * 1.16 * 1.4));
+        // Seats packed ~1.5 fan-widths apart at their size on screen, so the
+        // stands read as a full house rather than scattered pins
+        const count = Math.max(10, Math.round(g.W / (size * g.sizeScale * 1.5)));
         const seats = [];
         for (let i = 0; i < count; i++) {
           const xFrac = (i + (r % 2 ? 0.75 : 0.25) + (rand() - 0.5) * 0.3) / count;
           if (inAisle(xFrac) || rand() < 0.04) continue; // a few empty seats let the seat colors show through
+          const cap = rand() < 0.16 ? CAPS[(rand() * CAPS.length) | 0] : null;
           seats.push({
             xFrac,
             shirt: pick(SHIRTS),
             skin: SKINS[(rand() * SKINS.length) | 0],
             hair: HAIRS[(rand() * HAIRS.length) | 0],
-            cap: rand() < 0.16 ? CAPS[(rand() * CAPS.length) | 0] : null,
+            cap,
+            // 0 short, 1 long, 2 shaved, 3 bun / topknot
+            style: cap ? 0 : pick([[0, 10], [1, 4], [2, 2], [3, 1.4]]),
+            stripe: rand() < 0.24 ? pick(STRIPES) : null,
             lean: (rand() - 0.5) * 0.7,
             phase: rand() * Math.PI * 2,
             armsRoll: rand(), // compared against a live threshold so the whole stand can "cheer" together
@@ -2325,6 +2600,15 @@ export class BikeGame {
         this.crowdRows.push({ deck, t, depth, size, seats });
       }
     });
+  }
+
+  // Rebuilds the crowd when the stand's layout (rows, and how many seats fit
+  // across) changes — on a resize into another size class, not every frame.
+  ensureCrowdModel(g) {
+    const key = `${g.upperRows}/${g.lowerRows}/${Math.round(g.W / g.sizeScale / 24)}`;
+    if (this._crowdModelKey === key && this.crowdRows?.length) return;
+    this._crowdModelKey = key;
+    this.buildCrowd(g);
   }
 
   // ── Wreckage field (precomputed once, same reasoning as buildCrowd — a
@@ -2380,11 +2664,19 @@ export class BikeGame {
     const bandH = Math.max(10, H * 0.026);
     const bandTop = standTop + (lowerBottom - standTop) * 0.3;
     const par = this.camX * 0.1;
+    // Rows to fit each deck at a comfortable spacing, and fans scaled to that
+    // spacing (not to the screen's width): a small stand gets fewer rows of
+    // fans big enough to read, a big one the full house
+    const upH = bandTop - standTop, loH = lowerBottom - (bandTop + bandH);
+    const lowerRows = Math.max(4, Math.min(9, Math.floor(loH / 16.5)));
+    const sizeScale = Math.min(1.5, Math.max(0.55, loH / lowerRows / 18.2));
+    // The upper tier's smaller fans pack tighter, so it fits more rows
+    const upperRows = Math.max(3, Math.min(7, Math.floor(upH / (8 * sizeScale))));
     return {
       W, H, gY, par, shift: ((par % W) + W) % W,
       standTop, roofH: H * 0.026, trussH: H * 0.02, hoardH,
       bandTop, bandH, lowerTop: bandTop + bandH, lowerBottom,
-      sizeScale: Math.min(1.2, Math.max(0.6, W / 1300)),
+      upperRows, lowerRows, sizeScale,
     };
   }
 
@@ -2448,7 +2740,7 @@ export class BikeGame {
         }
 
         if (row.deck === 'upper') this.paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance);
-        else this.paintNearFans(ctx, g, row, y, size, ts, row.size >= 6.2 && !this.lowPower ? null : waveX, armsUpChance);
+        else this.paintNearFans(ctx, g, row, y, size, ts, size >= 6.5 && !this.lowPower ? null : waveX, armsUpChance);
 
         ctx.fillStyle = row.deck === 'upper' ? '#08111F' : '#0B1628';
         ctx.fillRect(0, stepY, W, deckBottom - stepY);
@@ -2550,7 +2842,7 @@ export class BikeGame {
     const ctx = this.ctx, waveX = (ts * 0.00008) % 1;
     const rows = [];
     this.crowdRows.forEach((row) => {
-      if (row.deck !== 'lower' || row.size < 6.2) return;
+      if (row.deck !== 'lower' || row.size * g.sizeScale < 6.5) return;
       const lag = this.waveLag(row);
       const seats = row.seats.filter((s) => this.waveRise(s.xFrac, waveX, lag) > 0.1);
       if (seats.length) rows.push({ row: { ...row, seats }, y: this.crowdRowY(g, row), size: row.size * g.sizeScale });
@@ -2610,9 +2902,9 @@ export class BikeGame {
   // `live` marks the per-frame wave overlay: it skips the props held up and
   // the fine shading/rim passes to stay cheap at full frame rate.
   paintNearFans(ctx, g, row, y, size, ts, waveX, armsUpChance, live = false) {
-    if (row.size < 6.2) { this.paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance); return; }
+    if (size < 6.5) { this.paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance); return; }
     const into = BikeGame.batchInto;
-    const arms = new Map(), hands = new Map(), bodies = new Map(), heads = new Map(), hair = new Map(), brims = new Map();
+    const arms = new Map(), hands = new Map(), bodies = new Map(), heads = new Map(), hair = new Map(), brims = new Map(), stripes = new Map();
     const fans = [], extras = [];
     const lag = this.waveLag(row);
     row.seats.forEach((s) => {
@@ -2630,7 +2922,9 @@ export class BikeGame {
         }
         into(bodies, s.shirt).push(x, yy);
         into(heads, s.skin).push(x, yy);
-        into(hair, s.cap || s.hair).push(x, yy);
+        if (s.cap) into(hair, s.cap).push(x, yy, 0);
+        else if (s.style !== 2) into(hair, s.hair).push(x, yy, s.style || 0);
+        if (s.stripe) into(stripes, s.stripe).push(x, yy);
         if (s.cap) into(brims, s.cap).push(x, yy);
         fans.push(x, yy);
         if (!live && (s.flag || s.scarf || s.sign || s.finger || phoneOn)) extras.push({ s, x, yy, phoneOn });
@@ -2655,9 +2949,19 @@ export class BikeGame {
       for (let i = 0; i < p.length; i += 2) ctx.roundRect(p[i] - size * 0.58, p[i + 1] - size * 0.12, size * 1.16, size * 1.3, corner);
       ctx.fill();
     });
+    // A band across the chest on the team jerseys
+    stripes.forEach((p, color) => {
+      ctx.fillStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) ctx.rect(p[i] - size * 0.58, p[i + 1] + size * 0.24, size * 1.16, size * 0.17);
+      ctx.fill();
+    });
     if (!live) {
+      // Shade down the far side, and over the lap where the row in front hides it
       ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.beginPath();
-      for (let i = 0; i < fans.length; i += 2) ctx.rect(fans[i] + size * 0.14, fans[i + 1] + size * 0.02, size * 0.44, size * 1.1);
+      for (let i = 0; i < fans.length; i += 2) {
+        ctx.rect(fans[i] + size * 0.14, fans[i + 1] + size * 0.02, size * 0.44, size * 1.1);
+        ctx.rect(fans[i] - size * 0.58, fans[i + 1] + size * 0.66, size * 0.72, size * 0.52);
+      }
       ctx.fill();
     }
     heads.forEach((p, color) => {
@@ -2665,9 +2969,28 @@ export class BikeGame {
       for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] + headR, p[i + 1] - size * 0.5); ctx.arc(p[i], p[i + 1] - size * 0.5, headR, 0, Math.PI * 2); }
       ctx.fill();
     });
+    if (!live) {
+      // The face turned from the floodlights falls into shadow on one side
+      ctx.fillStyle = 'rgba(40,20,8,0.2)'; ctx.beginPath();
+      for (let i = 0; i < fans.length; i += 2) {
+        const cx = fans[i], cy = fans[i + 1] - size * 0.5;
+        ctx.moveTo(cx, cy - headR); ctx.arc(cx, cy, headR, -Math.PI / 2, Math.PI / 2); ctx.closePath();
+      }
+      ctx.fill();
+    }
+    // Hair: short crops, long hair down to the shoulders, or a bun on top
     hair.forEach((p, color) => {
       ctx.fillStyle = color; ctx.beginPath();
-      for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] - hairR, p[i + 1] - size * 0.56); ctx.arc(p[i], p[i + 1] - size * 0.56, hairR, Math.PI, 0); ctx.closePath(); }
+      for (let i = 0; i < p.length; i += 3) {
+        const cx = p[i], cy = p[i + 1] - size * 0.56, style = p[i + 2];
+        ctx.moveTo(cx - hairR, cy); ctx.arc(cx, cy, hairR, Math.PI, 0); ctx.closePath();
+        if (style === 1) {
+          ctx.rect(cx - hairR, cy - 0.5, hairR * 0.42, size * 0.66);
+          ctx.rect(cx + hairR * 0.58, cy - 0.5, hairR * 0.42, size * 0.66);
+        } else if (style === 3) {
+          ctx.moveTo(cx + hairR * 0.52, cy - hairR * 0.95); ctx.arc(cx + hairR * 0.1, cy - hairR * 0.95, hairR * 0.42, 0, Math.PI * 2);
+        }
+      }
       ctx.fill();
     });
     brims.forEach((p, color) => {
@@ -2771,6 +3094,7 @@ export class BikeGame {
   // ever making a frame late. The layer doesn't depend on the camera at all;
   // drawStadium just tiles it at the current parallax shift every frame.
   ensureCrowdLayer(g) {
+    this.ensureCrowdModel(g);
     const key = `${this.cw}x${this.ch}@${this.dpr}`;
     if (this._crowdCanvas && this._crowdKey === key) return;
     const top = g.standTop - g.roofH - g.trussH - 6, h = g.lowerBottom + 4 - top;
@@ -2917,7 +3241,7 @@ export class BikeGame {
 
   floodlightSpots(g) {
     const py = g.standTop - g.roofH - g.trussH - g.H * 0.06;
-    const pw = Math.max(28, g.W * 0.03), ph = Math.max(12, g.H * 0.02);
+    const pw = Math.max(30, g.W * 0.032), ph = Math.max(15, g.H * 0.024);
     const spots = [];
     [0.1, 0.32, 0.68, 0.9].forEach((f, i) => {
       this.wrapXs(g, f, g.W * 0.25).forEach((px) => spots.push({ px, py, pw, ph, i }));
@@ -2983,15 +3307,36 @@ export class BikeGame {
       ctx.fillStyle = streak; ctx.fillRect(px - pw * 2.4, py - 0.75, pw * 4.8, 1.5);
       ctx.restore();
 
+      // Housing with a visor over the top, then a grid of lamps, each with
+      // its own hot glow
       ctx.fillStyle = '#0B111D';
-      ctx.beginPath(); ctx.roundRect(px - pw / 2 - 2, py - ph / 2 - 2, pw + 4, ph + 4, 3); ctx.fill();
-      const cols = 4, rows = 2, cw = pw / cols, chh = ph / rows;
-      ctx.fillStyle = '#FFF7E2';
+      ctx.beginPath(); ctx.roundRect(px - pw / 2 - 3, py - ph / 2 - 3, pw + 6, ph + 6, 3); ctx.fill();
+      ctx.strokeStyle = 'rgba(150,180,220,0.28)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = '#1C2638';
+      ctx.beginPath(); ctx.roundRect(px - pw / 2 - 5, py - ph / 2 - 6, pw + 10, 3, 1.5); ctx.fill();
+      const cols = 5, rows = 3, cw = pw / cols, chh = ph / rows;
+      ctx.fillStyle = '#FFF4D8';
       ctx.beginPath();
       for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-        ctx.roundRect(px - pw / 2 + c * cw + 1, py - ph / 2 + r * chh + 1, cw - 2, chh - 2, 1.5);
+        const lx = px - pw / 2 + c * cw + cw / 2, ly = py - ph / 2 + r * chh + chh / 2, lr = Math.min(cw, chh) * 0.36;
+        ctx.moveTo(lx + lr, ly); ctx.arc(lx, ly, lr, 0, Math.PI * 2);
       }
       ctx.fill();
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      const sprite = this.glowSprite(), gr = Math.min(cw, chh) * 1.1;
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        const lx = px - pw / 2 + c * cw + cw / 2, ly = py - ph / 2 + r * chh + chh / 2;
+        ctx.globalAlpha = 0.55; ctx.drawImage(sprite, lx - gr, ly - gr, gr * 2, gr * 2);
+      }
+      // A four-point star of glare off the bank
+      ctx.globalAlpha = 1;
+      const st = pw * 0.9;
+      [[st, 1.1], [st * 0.45, 0.9]].forEach(([len, w], k) => {
+        const g2 = ctx.createLinearGradient(px, py - len, px, py + len);
+        g2.addColorStop(0, 'rgba(255,246,222,0)'); g2.addColorStop(0.5, `rgba(255,246,222,${k ? 0.45 : 0.3})`); g2.addColorStop(1, 'rgba(255,246,222,0)');
+        ctx.fillStyle = g2; ctx.fillRect(px - w / 2, py - len, w, len * 2);
+      });
+      ctx.restore();
     });
   }
 
@@ -3053,26 +3398,7 @@ export class BikeGame {
     const k = firing ? Math.max(burst(2, 36), burst(40, 76) * 0.9) : 0;
     FRACS.forEach((f, i) => {
       this.wrapXs(g, f, 80).forEach((x) => {
-        if (k > 0.01) {
-          const flick = 0.85 + Math.sin(ts * 0.05 + i * 2.1) * 0.15;
-          const h = (44 + q * 80) * k * flick, w = 9 + q * 6;
-          ctx.save(); ctx.globalCompositeOperation = 'lighter';
-          const gl = ctx.createRadialGradient(x, base - h * 0.4, 0, x, base - h * 0.4, h);
-          gl.addColorStop(0, `rgba(255,150,60,${0.35 * k})`); gl.addColorStop(1, 'rgba(255,90,30,0)');
-          ctx.fillStyle = gl; ctx.fillRect(x - h, base - h * 1.4, h * 2, h * 1.4 + 12);
-          [[1, '255,96,32', 0.78], [0.62, '255,182,64', 0.88], [0.3, '255,250,222', 0.96]].forEach(([s, rgb, a]) => {
-            const fh = h * (0.68 + s * 0.32);
-            const fg = ctx.createLinearGradient(0, base, 0, base - fh);
-            fg.addColorStop(0, `rgba(${rgb},${a * k})`); fg.addColorStop(1, `rgba(${rgb},0)`);
-            ctx.fillStyle = fg;
-            ctx.beginPath();
-            ctx.moveTo(x - w * s * 0.5, base);
-            ctx.quadraticCurveTo(x - w * s * 1.15, base - fh * 0.5, x + Math.sin(ts * 0.03 + i) * w * 0.3, base - fh);
-            ctx.quadraticCurveTo(x + w * s * 1.15, base - fh * 0.5, x + w * s * 0.5, base);
-            ctx.closePath(); ctx.fill();
-          });
-          ctx.restore();
-        }
+        if (k > 0.01) this.drawFlameJet(x, base - 2, (44 + q * 80) * k, k, ts, i, 0.5 + q * 0.15);
         ctx.fillStyle = '#0B111D';
         ctx.beginPath(); ctx.roundRect(x - 6, base - 5, 12, 6, 1.5); ctx.fill();
         ctx.fillStyle = k > 0.01 ? '#FFB347' : '#3A4458';
@@ -3263,14 +3589,14 @@ export class BikeGame {
     if (since >= 0 && since < 1400) {
       const k = Math.min(1, since / 120) * (1 - Math.max(0, (since - 900) / 500));
       const towerW = Math.max(9, (r.P2.x - r.rx) * 0.11), h = Math.min(150, (gY - ly) * 1.25 + 40);
-      [lx - towerW - 14, lx + 14].forEach((cx, i) => this.drawFireStream(cx, gY - 10, cx + (i ? 8 : -8), gY - 10 - h, k, ts + i * 260, 11));
+      [lx - towerW - 14, lx + 14].forEach((cx, i) => this.drawFlameJet(cx, gY - 10, h * (0.85 + k * 0.15), k, ts, i + 7, 0.62, i ? 0.07 : -0.07));
     }
   }
 
   bakeRamp(r, key) {
     const pad = 40;
     const x0 = r.rx - pad, y0 = r.P2.y + RAMP_DROP - pad;
-    const w = Math.ceil(r.P2.x + pad - x0), h = Math.ceil(r.gY + RAMP_DROP + pad - y0);
+    const w = Math.ceil(r.P2.x + r.rh * 0.5 + pad - x0), h = Math.ceil(r.gY + RAMP_DROP + pad - y0);
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(w * this.dpr); canvas.height = Math.round(h * this.dpr);
     const bctx = canvas.getContext('2d');
@@ -3321,6 +3647,14 @@ export class BikeGame {
       tube(tL, y0, tR, y1, tw * 0.75); tube(tR, y0, tL, y1, tw * 0.75);
     }
     tube(tL, tTop, tL, tBot, tw); tube(tR, tTop, tR, tBot, tw);
+    // Rear support: an A-frame leg raking back from the top of the tower to
+    // the ground, braced to it, so the kicker stands on a wide, solid base
+    const footX = P2.x + rampH * 0.42;
+    const legAt = (k) => ({ x: tR + (footX - tR) * k, y: tTop + (tBot - tTop) * k });
+    [0.36, 0.68].forEach((k) => { const p = legAt(k); tube(tR, p.y, p.x, p.y, tw * 0.75); });
+    const m1 = legAt(0.36), m2 = legAt(0.68);
+    tube(tR, m1.y, m2.x, m2.y, tw * 0.7); tube(tR, m2.y, footX, tBot, tw * 0.7);
+    tube(tR, tTop, footX, tBot, tw * 1.1);
 
     // Posts from the deck to the base rail, braced in alternating diagonals
     const posts = [0.34, 0.56, 0.78].map((t) => { const p = at(t); return { x: p.x, top: p.y + thick * 0.9 }; });
@@ -3352,20 +3686,20 @@ export class BikeGame {
     }
 
     // Base rail with hazard stripes
-    const rx0 = posts[0].x - tw;
+    const rx0 = posts[0].x - tw, rx1 = footX + tw;
     ctx.save();
-    ctx.beginPath(); ctx.rect(rx0, gY - railH, P2.x - rx0, railH); ctx.clip();
-    ctx.fillStyle = '#FFD23F'; ctx.fillRect(rx0, gY - railH, P2.x - rx0, railH);
+    ctx.beginPath(); ctx.rect(rx0, gY - railH, rx1 - rx0, railH); ctx.clip();
+    ctx.fillStyle = '#FFD23F'; ctx.fillRect(rx0, gY - railH, rx1 - rx0, railH);
     ctx.fillStyle = '#121826'; ctx.beginPath();
-    for (let xx = rx0 - railH; xx < P2.x; xx += railH * 2) {
+    for (let xx = rx0 - railH; xx < rx1; xx += railH * 2) {
       ctx.moveTo(xx, gY); ctx.lineTo(xx + railH, gY - railH); ctx.lineTo(xx + railH * 2, gY - railH); ctx.lineTo(xx + railH, gY); ctx.closePath();
     }
     ctx.fill();
     ctx.restore();
-    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(rx0, gY - railH, P2.x - rx0, 1);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.fillRect(rx0, gY - railH, rx1 - rx0, 1);
 
-    // Concrete footings under the posts and the tower
-    [...posts.slice(0, 3).map((p) => p.x), tL, tR].forEach((fx) => {
+    // Concrete footings under the posts, the tower and the rear leg
+    [...posts.slice(0, 3).map((p) => p.x), tL, tR, footX].forEach((fx) => {
       const fw = Math.max(5, tw * 4), fh = Math.max(3, railH * 0.6);
       const fg = ctx.createLinearGradient(0, gY - fh, 0, gY);
       fg.addColorStop(0, '#8C93A0'); fg.addColorStop(1, '#4E5562');
@@ -3636,74 +3970,101 @@ export class BikeGame {
     ctx.restore();
   }
 
-  // A stylised skull: one silhouette for cranium + cheekbones, angular eye
-  // sockets with a faint ember glow deep inside, an inverted-heart nasal
-  // cavity, a row of upper teeth and a slightly dropped jaw. Shared by the
-  // standalone 'skull' debris and the full humanSkeleton. Drawn at the local
-  // origin (roughly 16 wide × 21 tall) — callers translate/rotate/scale first.
+  // A human skull, front on: a domed cranium that pinches in at the temples
+  // and flares out over the cheekbones to a narrow upper jaw, deep rounded
+  // eye sockets shaded from the rim in (a faint ember still glowing at the
+  // back of each), a heavy brow, a pear-shaped nasal cavity split by its
+  // septum, a row of separate worn teeth and a dropped lower jaw. A hairline
+  // crack runs down the dome. Shared by the standalone 'skull' debris and
+  // the full humanSkeleton. Drawn at the local origin (about 16 wide × 21
+  // tall) — callers translate/rotate/scale first.
   drawSkullDetail() {
     const ctx = this.ctx;
-    const BONE = '#E6DCC0', TEETH = '#F3ECD6', HOLE = '#0B0A08', INK = 'rgba(46,36,20,0.75)';
-
-    const dome = ctx.createRadialGradient(-2.5, -5, 1, 0, -1, 10);
-    dome.addColorStop(0, '#FBF5E4'); dome.addColorStop(0.55, BONE); dome.addColorStop(1, '#A99B76');
-    ctx.fillStyle = dome;
-    ctx.beginPath();
-    ctx.moveTo(-7, 0.5);
-    ctx.bezierCurveTo(-8, -6.5, -4.2, -9, 0, -9);
-    ctx.bezierCurveTo(4.2, -9, 8, -6.5, 7, 0.5);
-    ctx.bezierCurveTo(6.8, 2.4, 5.6, 3.2, 4.8, 3.6);
-    ctx.lineTo(4, 5.8); ctx.lineTo(-4, 5.8); ctx.lineTo(-4.8, 3.6);
-    ctx.bezierCurveTo(-5.6, 3.2, -6.8, 2.4, -7, 0.5);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = INK; ctx.lineWidth = 0.7; ctx.stroke();
-
-    ctx.fillStyle = 'rgba(120,100,60,0.18)';
-    ctx.beginPath(); ctx.ellipse(-5.6, -1.5, 1.4, 3, 0.2, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(5.6, -1.5, 1.4, 3, -0.2, 0, Math.PI * 2); ctx.fill();
-
-    [-1, 1].forEach((s) => {
-      ctx.fillStyle = HOLE;
+    const INK = 'rgba(46,34,18,0.82)', TOOTH = '#F6EFDA';
+    const skull = () => {
       ctx.beginPath();
-      ctx.moveTo(s * 0.9, -2.6);
-      ctx.quadraticCurveTo(s * 4.8, -4.4, s * 5.2, -0.8);
-      ctx.quadraticCurveTo(s * 4.6, 1.8, s * 2.4, 1.6);
-      ctx.quadraticCurveTo(s * 0.6, 1.2, s * 0.9, -2.6);
-      ctx.closePath(); ctx.fill();
-      const glow = ctx.createRadialGradient(s * 3, -0.6, 0, s * 3, -0.6, 1.8);
-      glow.addColorStop(0, 'rgba(255,120,40,0.55)'); glow.addColorStop(1, 'rgba(255,120,40,0)');
-      ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(s * 3, -0.6, 1.8, 0, Math.PI * 2); ctx.fill();
+      ctx.moveTo(0, -9.4);
+      ctx.bezierCurveTo(5.3, -9.4, 8.3, -6, 7.9, -1.7);
+      ctx.bezierCurveTo(7.7, 0.2, 7.1, 1.2, 7.3, 2.4);
+      ctx.quadraticCurveTo(7.4, 3.9, 5.6, 4.3);
+      ctx.quadraticCurveTo(4.5, 4.5, 4.2, 5.5);
+      ctx.lineTo(3.9, 7.2); ctx.lineTo(-3.9, 7.2); ctx.lineTo(-4.2, 5.5);
+      ctx.quadraticCurveTo(-4.5, 4.5, -5.6, 4.3);
+      ctx.quadraticCurveTo(-7.4, 3.9, -7.3, 2.4);
+      ctx.bezierCurveTo(-7.1, 1.2, -7.7, 0.2, -7.9, -1.7);
+      ctx.bezierCurveTo(-8.3, -6, -5.3, -9.4, 0, -9.4);
+      ctx.closePath();
+    };
+    const dome = ctx.createRadialGradient(-2.6, -5.6, 0.6, 0, -1, 11.5);
+    dome.addColorStop(0, '#FFFAEC'); dome.addColorStop(0.5, '#E8DCBE'); dome.addColorStop(1, '#9E8C69');
+    ctx.fillStyle = dome; skull(); ctx.fill();
+    // Hollows: the temples, under the cheekbones and either side of the jaw
+    ctx.save(); skull(); ctx.clip();
+    ctx.fillStyle = 'rgba(104,82,48,0.3)';
+    [[-7.4, -0.4, 1.6, 3.2, 0.15], [7.4, -0.4, 1.6, 3.2, -0.15], [-4.6, 5.6, 1.3, 1.6, 0.4], [4.6, 5.6, 1.3, 1.6, -0.4]].forEach(([ex, ey, rx, ry, a]) => {
+      ctx.beginPath(); ctx.ellipse(ex, ey, rx, ry, a, 0, Math.PI * 2); ctx.fill();
     });
-
-    ctx.fillStyle = HOLE;
+    ctx.restore();
+    ctx.strokeStyle = INK; ctx.lineWidth = 0.75; skull(); ctx.stroke();
+    // Heavy brow catching the light over each socket
+    ctx.strokeStyle = 'rgba(255,252,240,0.7)'; ctx.lineWidth = 0.6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-5.4, -4.2); ctx.quadraticCurveTo(-3, -5.2, -0.9, -3.8); ctx.moveTo(0.9, -3.8); ctx.quadraticCurveTo(3, -5.2, 5.4, -4.2); ctx.stroke();
+    // Eye sockets, deep and shaded, a dying ember at the back of each
+    [-1, 1].forEach((s) => {
+      ctx.beginPath();
+      ctx.moveTo(s * 0.9, -2.9);
+      ctx.bezierCurveTo(s * 2.6, -4.1, s * 5.4, -3.7, s * 5.5, -1.1);
+      ctx.bezierCurveTo(s * 5.6, 1.2, s * 4, 2, s * 2.6, 1.8);
+      ctx.bezierCurveTo(s * 1.1, 1.6, s * 0.6, 0.3, s * 0.9, -2.9);
+      ctx.closePath();
+      const sg = ctx.createRadialGradient(s * 3.1, -0.7, 0.2, s * 3.1, -0.9, 3);
+      sg.addColorStop(0, '#040201'); sg.addColorStop(0.62, '#1A1009'); sg.addColorStop(1, '#5A4326');
+      ctx.fillStyle = sg; ctx.fill();
+      ctx.strokeStyle = INK; ctx.lineWidth = 0.5; ctx.stroke();
+      const glow = ctx.createRadialGradient(s * 3.1, -0.6, 0, s * 3.1, -0.6, 1.6);
+      glow.addColorStop(0, 'rgba(255,128,44,0.6)'); glow.addColorStop(1, 'rgba(255,110,40,0)');
+      ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(s * 3.1, -0.6, 1.6, 0, Math.PI * 2); ctx.fill();
+    });
+    // Nasal cavity: a dark pear split by the septum
+    ctx.fillStyle = '#0E0905';
     ctx.beginPath();
-    ctx.moveTo(0, 1.6);
-    ctx.quadraticCurveTo(-1.6, 3.2, -0.9, 4.2);
-    ctx.lineTo(0, 3.7); ctx.lineTo(0.9, 4.2);
-    ctx.quadraticCurveTo(1.6, 3.2, 0, 1.6);
+    ctx.moveTo(0, 1.4);
+    ctx.bezierCurveTo(-0.9, 2.1, -1.8, 3.6, -1.1, 4.4);
+    ctx.quadraticCurveTo(-0.5, 4.7, 0, 4.2);
+    ctx.quadraticCurveTo(0.5, 4.7, 1.1, 4.4);
+    ctx.bezierCurveTo(1.8, 3.6, 0.9, 2.1, 0, 1.4);
     ctx.fill();
-
-    ctx.fillStyle = TEETH; ctx.fillRect(-3.6, 5.2, 7.2, 1.8);
-    ctx.strokeStyle = INK; ctx.lineWidth = 0.4;
+    ctx.strokeStyle = 'rgba(214,198,160,0.85)'; ctx.lineWidth = 0.32;
+    ctx.beginPath(); ctx.moveTo(0, 2.3); ctx.lineTo(0, 4.1); ctx.stroke();
+    // Upper teeth: separate, worn, slightly uneven
+    ctx.fillStyle = TOOTH; ctx.strokeStyle = INK; ctx.lineWidth = 0.32;
     ctx.beginPath();
-    for (let t = -2.7; t <= 2.8; t += 0.9) { ctx.moveTo(t, 5.2); ctx.lineTo(t, 7); }
-    ctx.stroke();
-
-    ctx.fillStyle = BONE;
+    for (let i = 0; i < 8; i++) {
+      const tx = -3.5 + i * 0.88, th = 1.75 - Math.abs(i - 3.5) * 0.12 - (i === 2 ? 0.35 : 0);
+      ctx.roundRect(tx, 5.5, 0.8, th, [0.1, 0.1, 0.35, 0.35]);
+    }
+    ctx.fill(); ctx.stroke();
+    // Lower jaw, dropped a little and its teeth
+    const jaw = () => {
+      ctx.beginPath();
+      ctx.moveTo(-4.6, 7.8); ctx.lineTo(-3.6, 8); ctx.lineTo(3.6, 8); ctx.lineTo(4.6, 7.8);
+      ctx.lineTo(4.1, 10.2); ctx.quadraticCurveTo(2.4, 11.7, 0, 11.8); ctx.quadraticCurveTo(-2.4, 11.7, -4.1, 10.2);
+      ctx.closePath();
+    };
+    const jg = ctx.createLinearGradient(0, 7.8, 0, 11.8);
+    jg.addColorStop(0, '#E6DABB'); jg.addColorStop(1, '#A8966F');
+    ctx.fillStyle = jg; jaw(); ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 0.6; jaw(); ctx.stroke();
+    ctx.fillStyle = TOOTH; ctx.strokeStyle = INK; ctx.lineWidth = 0.3;
     ctx.beginPath();
-    ctx.moveTo(-4.4, 7.6); ctx.lineTo(4.4, 7.6); ctx.lineTo(3.6, 10.4);
-    ctx.quadraticCurveTo(0, 11.6, -3.6, 10.4);
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = INK; ctx.lineWidth = 0.6; ctx.stroke();
-    ctx.fillStyle = TEETH; ctx.fillRect(-3.2, 7.6, 6.4, 1.4);
-    ctx.strokeStyle = INK; ctx.lineWidth = 0.35;
-    ctx.beginPath();
-    for (let t = -2.4; t <= 2.5; t += 0.8) { ctx.moveTo(t, 7.6); ctx.lineTo(t, 9); }
-    ctx.stroke();
-
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
-    ctx.beginPath(); ctx.ellipse(-2.6, -6.2, 2.4, 1.1, -0.35, 0, Math.PI * 2); ctx.fill();
+    for (let i = 0; i < 7; i++) ctx.roundRect(-3.1 + i * 0.88, 8, 0.8, 1.3, [0.35, 0.35, 0.1, 0.1]);
+    ctx.fill(); ctx.stroke();
+    // A hairline crack down the dome and the light on its crown
+    ctx.strokeStyle = 'rgba(80,62,34,0.6)'; ctx.lineWidth = 0.4;
+    ctx.beginPath(); ctx.moveTo(2.6, -9.1); ctx.lineTo(3.4, -7.2); ctx.lineTo(2.8, -6); ctx.lineTo(3.7, -4.6); ctx.moveTo(3.4, -7.2); ctx.lineTo(4.6, -6.9); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.38)';
+    ctx.beginPath(); ctx.ellipse(-2.8, -6.6, 2.5, 1.1, -0.35, 0, Math.PI * 2); ctx.fill();
+    ctx.lineCap = 'butt';
   }
 
   // A blown-out puncture gash exposing dark rubber underneath — a small
@@ -3861,34 +4222,64 @@ export class BikeGame {
     if (!flat) this.drawDirtMound(0, 1, 8, 3);
   }
 
+  // A skull tipped back in the sand on top of a thigh bone and a rib, its
+  // jaw half-sunk under a little drift, a couple of vertebrae beside it.
   drawPropSkullAndBones() {
     const ctx = this.ctx;
-    this.drawBone(-11, 1, 11, 8, 1.8);
-    this.drawBone(-11, 8, 11, 1, 1.8);
-    ctx.save(); ctx.translate(0, -8.5);
+    const rib = () => { ctx.beginPath(); ctx.moveTo(-12, 4.5); ctx.bezierCurveTo(-9, -3.5, 1, -4.5, 6, 0.5); };
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(58,44,22,0.62)'; ctx.lineWidth = 2.4; rib(); ctx.stroke();
+    ctx.strokeStyle = '#EAE0C4'; ctx.lineWidth = 1.3; rib(); ctx.stroke();
+    ctx.lineCap = 'butt';
+    this.drawBone(-14, 1.5, 9, 4.5, 1.7);
+    this.drawVertebra(11.5, 3.6, 1.15, 0.3);
+    this.drawVertebra(15.2, 4.4, 1, -0.2);
+    ctx.save(); ctx.translate(1.5, -8.2); ctx.rotate(-0.3); ctx.scale(1.05, 1.05);
     this.drawSkullDetail();
-    ctx.strokeStyle = 'rgba(90,78,50,0.45)'; ctx.lineWidth = 0.45;
-    ctx.beginPath(); ctx.moveTo(3.4, -7.6); ctx.lineTo(4.6, -3.2); ctx.lineTo(3.6, -0.8); ctx.stroke();
     ctx.restore();
-    this.drawSandDusting([[0, 7, 13, 0.35]]);
+    this.drawSandDrift(0.5, 4.8, 10, 2.3);
+    this.drawSandDusting([[0, 6, 15, 0.32]]);
   }
 
-  // A small pile: a femur, a curved rib, a vertebra and a finger bone.
+  // One vertebra lying on its side: a rounded body with a stubby spine and
+  // two short knobs of bone, `s` the size, tipped by `a`.
+  drawVertebra(x, y, s, a) {
+    const ctx = this.ctx;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(a); ctx.scale(s, s);
+    ctx.lineCap = 'round';
+    const draw = (col, p) => {
+      ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.1 + p * 2;
+      ctx.beginPath(); ctx.moveTo(0, -0.9); ctx.lineTo(-0.5, -2.6); ctx.moveTo(-1.3, 0); ctx.lineTo(-2.4, -0.5); ctx.moveTo(1.3, 0); ctx.lineTo(2.4, -0.5); ctx.stroke();
+      ctx.beginPath(); ctx.roundRect(-1.6 - p, -1.15 - p, 3.2 + p * 2, 2.3 + p * 2, 1 + p); ctx.fill();
+    };
+    draw('rgba(58,44,22,0.62)', 0.5);
+    draw('#E2D6B5', 0);
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.beginPath(); ctx.ellipse(-0.4, -0.45, 0.9, 0.38, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.lineCap = 'butt';
+    ctx.restore();
+  }
+
+  // What's left of a rider: a ribcage arching up out of the sand on its
+  // spine, a thigh bone lying across the front and a hand reaching out.
   drawPropBonePile() {
     const ctx = this.ctx;
-    const rib = () => { ctx.beginPath(); ctx.moveTo(-7, 6); ctx.quadraticCurveTo(0, -1, 9, 4); };
     ctx.lineCap = 'round';
-    ctx.strokeStyle = 'rgba(58,44,22,0.62)'; ctx.lineWidth = 2.5; rib(); ctx.stroke();
-    ctx.strokeStyle = '#E9DFC2'; ctx.lineWidth = 1.4; rib(); ctx.stroke();
-    this.drawBone(-12, 3, 9, -3, 1.9);
-    ctx.fillStyle = 'rgba(58,44,22,0.62)';
-    ctx.beginPath(); ctx.roundRect(5.5, 2.2, 4.4, 3.4, 1.2); ctx.fill();
-    ctx.fillStyle = '#E6DBB8';
-    ctx.beginPath(); ctx.roundRect(6, 2.6, 3.4, 2.6, 1); ctx.fill();
-    ctx.strokeStyle = '#D9CDA8'; ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.moveTo(5.2, 3.9); ctx.lineTo(3.8, 3.4); ctx.moveTo(10.2, 3.9); ctx.lineTo(11.6, 3.4); ctx.stroke();
-    this.drawBone(-7, 8, -2, 7, 0.8);
-    this.drawSandDusting([[-2, 7, 12, 0.3]]);
+    // Spine along the ground, then the ribs curving up and over off it
+    for (let i = 0; i < 7; i++) this.drawVertebra(-12 + i * 3.3, 3.8 - i * 0.25, 0.95 - i * 0.03, -0.1 + i * 0.03);
+    for (let i = 0; i < 5; i++) {
+      const x0 = -10.5 + i * 3.6, top = -8.2 + Math.abs(i - 1.6) * 1.1;
+      const rib = () => { ctx.beginPath(); ctx.moveTo(x0, 3.2 - i * 0.25); ctx.bezierCurveTo(x0 - 3, -1, x0 - 0.5, top, x0 + 4.6, top + 2.2); };
+      ctx.strokeStyle = 'rgba(58,44,22,0.62)'; ctx.lineWidth = 2.3; rib(); ctx.stroke();
+      const rg = ctx.createLinearGradient(0, top, 0, 4);
+      rg.addColorStop(0, '#F7EFD8'); rg.addColorStop(1, '#BCAC86');
+      ctx.strokeStyle = rg; ctx.lineWidth = 1.3; rib(); ctx.stroke();
+    }
+    this.drawBone(-6, 7.5, 13, 3.6, 1.75);
+    this.drawBoneDigits(-15.5, 6.2, Math.PI * 0.92, 1.2);
+    ctx.lineCap = 'butt';
+    this.drawSandDrift(4, 6.4, 11, 2.2);
+    this.drawSandDusting([[-2, 7, 14, 0.3]]);
   }
 
   // The rider's MX helmet lying on its side: scuffed, cracked, goggles
@@ -3952,7 +4343,25 @@ export class BikeGame {
       ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
       ctx.strokeStyle = INK; ctx.lineWidth = 0.9; ctx.stroke();
     };
-    ctx.save(); ctx.translate(-2, -10); ctx.rotate(0.6); ctx.scale(0.78, 0.78);
+    // Pieces that broke off and landed nearby: the rear fender, the snapped
+    // handlebar and a couple of bolts
+    poly([-30, 1.6, -18, -0.6, -17, 1.4, -28.5, 2.6], '#E6EBF1');
+    ctx.fillStyle = LIVERY.main; ctx.beginPath(); ctx.moveTo(-26, 1.7); ctx.lineTo(-21, 0.6); ctx.lineTo(-20.6, 1.4); ctx.lineTo(-25.6, 2.3); ctx.closePath(); ctx.fill();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = INK; ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.moveTo(19, 1.6); ctx.lineTo(24.5, 0.4); ctx.lineTo(28, -2.6); ctx.stroke();
+    ctx.strokeStyle = '#2A303C'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(19, 1.6); ctx.lineTo(24.5, 0.4); ctx.lineTo(28, -2.6); ctx.stroke();
+    ctx.strokeStyle = LIVERY.main; ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.moveTo(26.6, -1.4); ctx.lineTo(28.3, -2.9); ctx.stroke();
+    ctx.lineCap = 'butt';
+    ctx.fillStyle = '#9AA3B2';
+    [[-12, 3, 0.9], [14, 2.6, 0.8], [31, 2, 0.7]].forEach(([bx, by, br]) => { ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill(); });
+    // The bike itself, nose-dived into the dirt: nothing below the ground
+    // line shows, so the front wheel reads as buried, not floating
+    ctx.save();
+    ctx.beginPath(); ctx.rect(-70, -90, 140, 92.5); ctx.clip();
+    ctx.translate(-2, -10); ctx.rotate(0.6); ctx.scale(0.78, 0.78);
     this.drawWheel(-15, 9.5, 11.5, 0.4, false, 0);
     this.drawWheel(15, 13, 11.5, 2.1, true, 0);
     poly([-2.5, 1.6, -13.5, 7.5, -13.5, 11, -2.5, 6], '#AEB7C4');
@@ -3979,7 +4388,9 @@ export class BikeGame {
     ctx.beginPath(); ctx.moveTo(8.5, -14.5); ctx.lineTo(5, -20); ctx.stroke();
     ctx.lineCap = 'butt';
     ctx.restore();
-    this.drawDirtMound(4, 2, 14, 5);
+    // Dirt heaped up where the front end ploughed in, sprayed out either side
+    this.drawDirtMound(5, 2, 17, 5.5);
+    this.drawSandDusting([[-8, 3, 9, 0.35], [17, 3, 8, 0.3]]);
   }
 
   // A fossilised T. rex laid out where it fell, head thrown back in a last
@@ -5083,59 +5494,119 @@ export class BikeGame {
     ctx.restore();
   }
 
-  // The burnt-out bike after the blast: it tumbles, settles on the track and
-  // keeps burning once the fireball has lifted.
+  // The burnt-out bike after the blast. Flung up out of the fireball it
+  // tumbles end over end, slams down upside down in the crater, bounces,
+  // rocks and settles on its seat and bars with its wheels in the air — the
+  // buckled front one bent out of true, the back one still turning — and
+  // burns: a charred, twisted frame with scorched paint and embers pulsing
+  // along it, flames pouring off the engine, tank and back tyre, a pool of
+  // spilled fuel burning round it, and smoke rising into the column. Drawn
+  // in bike units (scaled by BIKE_SCALE) with the track surface at y = 21.
   drawWreck(age, ts) {
-    const ctx = this.ctx;
-    const settle = 1 - Math.exp(-age / 9);
+    const ctx = this.ctx, G = 21, side = this.roundNum % 2 ? 1 : -1;
+    const p = Math.min(1, age / 18), e = 1 - (1 - p) * (1 - p);
+    const restY = G - 12.6, restRot = side * (Math.PI * 3) - side * 0.16;
+    let wx = side * 8 * e, wy = restY * p - Math.sin(p * Math.PI) * 32, rot = restRot * e;
+    if (age >= 18) {
+      const b = age - 18;
+      wy = restY - (b < 9 ? Math.sin((b / 9) * Math.PI) * 5 : 0);
+      rot = restRot + Math.sin(b * 0.5) * 0.2 * Math.exp(-b / 12);
+    }
+    const c = Math.cos(rot), s = Math.sin(rot);
+    const at = (x, y) => ({ x: wx + x * c - y * s, y: wy + x * s + y * c });
+    const INK = 'rgba(6,4,3,0.9)';
+    const fa = Math.min(1, Math.max(0, (age - 8) / 10));
+
+    // Fuel spilled where it landed, burning in a pool with a glow under it
+    if (age > 16) {
+      const k = Math.min(1, (age - 16) / 14);
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      ctx.translate(wx, G); ctx.scale(1, 0.32);
+      const pool = ctx.createRadialGradient(0, 0, 0, 0, 0, 40);
+      pool.addColorStop(0, `rgba(255,150,50,${0.55 * k})`); pool.addColorStop(0.5, `rgba(255,100,30,${0.25 * k})`); pool.addColorStop(1, 'rgba(255,80,20,0)');
+      ctx.fillStyle = pool; ctx.beginPath(); ctx.arc(0, 0, 40, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      for (let i = 0; i < 7; i++) {
+        const fx = wx + (i - 3) * 5.6 + Math.sin(i * 2.7) * 1.5, beat = 0.75 + 0.25 * Math.sin(ts * 0.024 + i * 1.9) * Math.sin(ts * 0.011 + i);
+        this.drawFlame(fx, G + 0.5, (6 + (i % 3) * 2.5) * beat * k * (1 - Math.abs(i - 3) * 0.08), Math.sin(ts * 0.01 + i) * 0.12, Math.floor(ts / 95 + i * 2.3), k, 0.9);
+      }
+    }
+
     ctx.save();
-    ctx.rotate((this.roundNum % 2 ? 1 : -1) * settle * 2.4);
-    const metal = ctx.createLinearGradient(-14, -6, 14, 8);
-    metal.addColorStop(0, '#3A3532'); metal.addColorStop(0.5, '#1E1A18'); metal.addColorStop(1, '#0B0A09');
-    ctx.fillStyle = metal; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 1.4;
-    ctx.beginPath(); ctx.roundRect(-14, -6, 28, 9, 3); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = LIVERY.far;
-    ctx.beginPath(); ctx.moveTo(2, -6); ctx.lineTo(11, -5); ctx.lineTo(8, -1); ctx.lineTo(1, -2); ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = '#8A6A2A'; ctx.lineWidth = 2; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(12, -4); ctx.lineTo(15, 3); ctx.lineTo(13, 8); ctx.stroke();
-    ctx.lineCap = 'butt';
-    const blur = Math.max(0, 1 - age / 25), wheelSpin = 54 * (1 - Math.exp(-age / 30));
-    this.drawWheel(-10, 8, 9, wheelSpin, true, blur);
-    this.drawWheel(12, 7, 7.5, -wheelSpin * 1.3, true, blur);
-    ctx.fillStyle = 'rgba(210,100,20,0.35)';
-    [[-6, -3], [3, -1], [-2, 1], [8, 0]].forEach(([px, py]) => { ctx.beginPath(); ctx.arc(px, py, 1, 0, Math.PI * 2); ctx.fill(); });
+    ctx.translate(wx, wy); ctx.rotate(rot);
+    const spin = age < 18 ? age * 0.5 : 9 + (age - 18) * 0.06 + ts * 0.0012;
+    // Back wheel, still turning; the front one buckled — squashed out of
+    // round and twisted on its bent fork
+    this.drawWheel(-13, 5, 8.6, spin, true, 0);
+    ctx.save(); ctx.translate(14, 5.6); ctx.rotate(0.35); ctx.scale(0.66, 1);
+    this.drawWheel(0, 0, 8.4, spin * 0.3 + 1.2, true, 0);
+    ctx.restore();
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    // Swingarm, bent fork and handlebar: blackened metal over a dark edge
+    const bar = (pts, w, col) => {
+      ctx.strokeStyle = INK; ctx.lineWidth = w + 1.4;
+      ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+      ctx.strokeStyle = col; ctx.lineWidth = w;
+      ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+    };
+    bar([[-13, 5], [-3, 1.5]], 2.4, '#3A322E');
+    bar([[7.5, -8.5], [10.8, -1.5], [14, 5.6]], 2.6, '#5C4A2A');
+    bar([[7.5, -8.5], [5.6, -12.4]], 1.8, '#2E2826');
+    bar([[3, -12.8], [8.6, -13.6]], 1.8, '#2E2826');
+    // Exhaust, blued and sooted from the heat
+    bar([[1.5, 3.5], [-8, 2.6], [-17, -2.4]], 2.2, '#6E6A72');
+    // Frame and engine: charred dark steel, lit along the top edges
+    const frame = ctx.createLinearGradient(0, -10, 0, 7);
+    frame.addColorStop(0, '#4A403B'); frame.addColorStop(0.5, '#221C1A'); frame.addColorStop(1, '#0E0B0A');
+    ctx.fillStyle = frame; ctx.strokeStyle = INK; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(-6.5, -3.2, 12, 9.4, 2.6); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#5E5650'; ctx.beginPath(); ctx.arc(-1, 1.6, 2.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1A1514'; ctx.beginPath(); ctx.arc(-1, 1.6, 1.2, 0, Math.PI * 2); ctx.fill();
+    bar([[-11, -6.4], [-2, -4], [7.5, -8.5]], 2.4, '#2C2523');
+    // Tank: the red livery scorched black in patches
+    const tank = () => { ctx.beginPath(); ctx.moveTo(-3.5, -6.5); ctx.quadraticCurveTo(-2, -11, 4.5, -10.6); ctx.lineTo(7.4, -8.6); ctx.lineTo(5.5, -5.2); ctx.quadraticCurveTo(0.5, -4.2, -3.5, -6.5); ctx.closePath(); };
+    const tg = ctx.createLinearGradient(-3, -11, 6, -5);
+    tg.addColorStop(0, LIVERY.dark); tg.addColorStop(0.6, '#4A1414'); tg.addColorStop(1, '#1A0B0A');
+    ctx.fillStyle = tg; tank(); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.9; ctx.stroke();
+    ctx.save(); tank(); ctx.clip();
+    ctx.fillStyle = 'rgba(8,5,4,0.7)';
+    [[1, -8, 2.6], [5, -7, 1.8]].forEach(([sx, sy, sr]) => { ctx.beginPath(); ctx.arc(sx, sy, sr, 0, Math.PI * 2); ctx.fill(); });
+    ctx.restore();
+    // Seat, torn open, and the rear fender cracked and sagging
+    bar([[-15.5, -6.6], [-3, -7.8]], 2.6, '#16120F');
+    ctx.fillStyle = '#B9B2A6'; ctx.strokeStyle = INK; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.moveTo(-15, -6.4); ctx.lineTo(-25, -9.6); ctx.lineTo(-24, -7.4); ctx.lineTo(-19.5, -5.2); ctx.lineTo(-14.5, -4.6); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(14,9,6,0.6)'; ctx.beginPath(); ctx.arc(-21, -7.6, 1.8, 0, Math.PI * 2); ctx.fill();
+    // Number plate, sooted, its "42" still just showing
+    ctx.fillStyle = '#A9A294'; ctx.beginPath(); ctx.moveTo(6.4, -10.6); ctx.lineTo(10.6, -9.4); ctx.lineTo(9.6, -5.8); ctx.lineTo(5.6, -6.8); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(20,34,63,0.7)'; ctx.font = `italic 800 3.6px ${FONT_NUM}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('42', 8.1, -8.2); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
     ctx.restore();
 
-    if (age > 8) {
-      // Still burning: a glow on the ground under the wreck, then each flame
-      // as three nested, swaying tongues — red outside, orange, yellow core.
-      const flameSeed = this.roundNum * 7 + 3, fa = Math.min(1, (age - 8) / 10);
+    // Embers glowing and fading along the hot metal
+    if (age > 6) {
+      const { fire } = this.fireSprites();
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
-      const base = ctx.createRadialGradient(0, -2, 0, 0, -2, 28);
-      base.addColorStop(0, `rgba(255,150,50,${0.5 * fa})`); base.addColorStop(1, 'rgba(255,90,30,0)');
-      ctx.fillStyle = base; ctx.fillRect(-28, -30, 56, 56);
-      ctx.restore();
-      ctx.globalAlpha = fa;
-      [[-8, -3, 1.6], [-1, -6, 2], [6, -2, 1.4], [-4, -7, 1.15], [10, 1, 1.1], [-11, 2, 0.9], [2, -1, 1.25]].forEach(([fx, fy, fs], fi) => {
-        const flick = 0.7 + Math.sin(ts * 0.02 + flameSeed + fi * 2) * 0.3;
-        const sway = Math.sin(ts * 0.013 + fi * 1.7) * 1.6 * fs;
-        const h = (9 + flick * 7) * fs, w = (4 + flick * 2) * fs;
-        ctx.save(); ctx.translate(fx, fy);
-        [[1, 'rgba(226,58,20,0.85)'], [0.68, 'rgba(255,146,38,0.92)'], [0.38, 'rgba(255,238,170,0.96)']].forEach(([s, col]) => {
-          ctx.fillStyle = col;
-          ctx.beginPath();
-          ctx.moveTo(0, 1);
-          ctx.quadraticCurveTo(w * s * 1.05, -h * s * 0.35, sway * s, -h * s);
-          ctx.quadraticCurveTo(-w * s * 1.05, -h * s * 0.35, 0, 1);
-          ctx.closePath(); ctx.fill();
-        });
-        ctx.restore();
+      [[-5, -3], [3, -4], [-1, 5], [6.5, -9], [-10, -6], [11, -2], [-15, 2]].forEach(([ex, ey], i) => {
+        const q = at(ex, ey), pulse = 0.5 + 0.5 * Math.sin(ts * 0.006 + i * 2.1), r = 2.6 + pulse * 1.4;
+        ctx.globalAlpha = (0.35 + pulse * 0.45) * Math.min(1, (age - 6) / 12);
+        ctx.drawImage(fire[3], q.x - r, q.y - r, r * 2, r * 2);
       });
-      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+    // Still burning: flames off the engine, the tank and the back tyre,
+    // always licking straight up whichever way the wreck lies
+    if (fa > 0) {
+      const seed = this.roundNum * 7 + 3;
+      [[-1, 0, 24], [3, -7, 20], [-13, 5, 15], [8, -9, 13]].forEach(([fx, fy, size], i) => {
+        const q = at(fx, fy);
+        this.drawFireSpot(q.x, Math.min(q.y, G - 1), size * (0.55 + fa * 0.45), ts, seed + i * 1.7, 0, fa);
+      });
     }
     if (age > 40) {
-      this.drawWreckSmoke(0, -8, this.roundNum * 13 + 3, ts);
-      this.drawWreckSmoke(6, -4, this.roundNum * 13 + 30, ts * 1.1);
+      const q = at(-1, 0);
+      this.drawWreckSmoke(q.x, q.y - 6, this.roundNum * 13 + 3, ts);
+      this.drawWreckSmoke(q.x + 6, q.y - 2, this.roundNum * 13 + 30, ts * 1.1);
     }
   }
 
@@ -5198,6 +5669,30 @@ export class BikeGame {
         }
         ctx.restore();
       }
+      // The crater's rim: clods of dirt thrown up either side, each lit on
+      // top, then charred scraps of the bike strewn round it — a few still
+      // burning, dying down slowly
+      if (age > 3) {
+        const a = c01((age - 3) / 6);
+        for (let i = 0; i < 18; i++) {
+          const sgn = i % 2 ? 1 : -1, d = 30 + rnd(i + 300) * 52, px = sgn * d;
+          const sz = (2 + rnd(i + 310) * 3.4) * (1.25 - d / 120), py = ground + 1.5 - rnd(i + 320) * 3.5;
+          ctx.fillStyle = `rgba(52,34,18,${a})`;
+          ctx.beginPath(); ctx.ellipse(px, py, sz * 1.35, sz * 0.8, rnd(i + 330) - 0.5, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = `rgba(168,124,74,${a * 0.85})`;
+          ctx.beginPath(); ctx.ellipse(px - sz * 0.2, py - sz * 0.38, sz * 0.82, sz * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      if (age > 22) {
+        const a = c01((age - 22) / 10), burn = 1 - c01((age - 22) / 520) * 0.6;
+        [[-70, 0.9], [-38, 0.7], [46, 1], [84, 0.75]].forEach(([dx, k], i) => {
+          ctx.save(); ctx.translate(dx, ground + 1); ctx.rotate(rnd(i + 340) - 0.5);
+          ctx.fillStyle = `rgba(18,14,13,${a})`;
+          ctx.beginPath(); ctx.moveTo(-4 * k, 0); ctx.lineTo(-2 * k, -3.2 * k); ctx.lineTo(3 * k, -2.4 * k); ctx.lineTo(4.4 * k, 0.4); ctx.closePath(); ctx.fill();
+          ctx.restore();
+          if (i % 3 !== 1) this.drawFireSpot(dx, ground, 13 * k * burn, ts, seed + i * 3.1, 0, a);
+        });
+      }
       // Ground shockwave and the dust skirt it rolls up
       if (age < 34) {
         const k = easeOut(age / 34), f = 1 - age / 34;
@@ -5222,9 +5717,14 @@ export class BikeGame {
       const smokeA = c01((age - 6) / 16) * (1 - c01((age - 74) / 120));
       if (smokeA > 0) {
         const stem = [], cap = [];
-        for (let i = 0; i < 9; i++) {
-          const f = i / 8;
-          stem.push({ x: Math.sin(f * 3.4 + seed) * 7 * rise, y: ground - 8 + (capY + capR * 0.35 - ground + 8) * f, r: (12 + f * 10) * (0.7 + rise * 0.6) });
+        for (let i = 0; i < 15; i++) {
+          const f = Math.pow(i / 14, 1.45);
+          // The column pours up out of the burning wreck: thin where it
+          // leaves the flames, swelling as it climbs into the cap
+          const base = ground - 34, wreckX = (this.roundNum % 2 ? 1 : -1) * 8 * BIKE_SCALE;
+          const r = (4.5 + f * 18) * (0.7 + rise * 0.6);
+          // Twisting a little side to side, and thin and see-through low down
+          stem.push({ x: wreckX * (1 - f) + Math.sin(f * 3.4 + seed) * 7 * rise + (i % 2 ? 1 : -1) * r * 0.3, y: base + (capY + capR * 0.35 - base) * f, r, a: Math.min(1, 0.3 + f * 3.2) });
         }
         for (let i = 0; i < 13; i++) {
           const a = (i / 13) * Math.PI * 2 + rnd(i) * 0.45;
@@ -5242,12 +5742,12 @@ export class BikeGame {
         // A dark silhouette for a crisp edge, then every billow as its own
         // moonlit puff, lower ones first so the cap heaps up on top, each
         // slowly churning
-        fillUnion(all, 1.06, 0, 3, '#110C0B', smokeA * 0.9);
+        fillUnion(all.filter((b) => (b.a ?? 1) > 0.95), 1.06, 0, 3, '#110C0B', smokeA * 0.9);
         const { smoke: sm } = this.billowSprites();
         const order = all.map((b, i) => ({ b, i })).sort((p, q) => q.b.y - p.b.y);
         order.forEach(({ b, i }) => {
           const r = b.r * 1.12 * (1 + Math.sin(ts * 0.0022 + i * 1.9) * 0.04);
-          ctx.globalAlpha = smokeA;
+          ctx.globalAlpha = smokeA * (b.a ?? 1);
           ctx.drawImage(sm[i % 3], b.x - r, b.y - r, r * 2, r * 2);
         });
         ctx.globalAlpha = 1;
@@ -5332,11 +5832,22 @@ export class BikeGame {
       const k = easeOut(age / 11), cool = c01(age / 48), fade = 1 - c01((age - 36) / 26);
       const fire = [];
       let minY = Infinity, maxR = 0;
-      for (let i = 0; i < 22; i++) {
-        const a = rnd(i * 3.7) * Math.PI * 2, dist = (0.1 + rnd(i * 3.7 + 11) * 0.9) * 74 * k;
+      for (let i = 0; i < 30; i++) {
+        const a = rnd(i * 3.7) * Math.PI * 2, dist = (0.1 + rnd(i * 3.7 + 11) * 0.9) * 78 * k;
         const lift = (cy - capY) * rise * (0.5 + rnd(i + 22) * 0.5);
-        const b = { x: Math.cos(a) * dist, y: cy - Math.abs(Math.sin(a)) * dist * 0.8 - lift, r: (20 + rnd(i + 33) * 24) * (0.42 + k * 0.85) * (1 + rise * 0.3) };
+        const b = { x: Math.cos(a) * dist, y: cy - Math.abs(Math.sin(a)) * dist * 0.8 - lift, r: (16 + rnd(i + 33) * 22) * (0.42 + k * 0.85) * (1 + rise * 0.3), a };
         fire.push(b); minY = Math.min(minY, b.y); maxR = Math.max(maxR, Math.hypot(b.x, b.y - cy) + b.r);
+      }
+      // Flame tongues licking up out of the top of the ball while it's
+      // still burning hot, behind the billows so they rise out of its edge
+      const lick = (1 - c01((age - 6) / 34)) * fade;
+      if (lick > 0.02) {
+        fire.forEach((b, i) => {
+          if (i % 2 || Math.sin(b.a) > -0.15) return;
+          const out = Math.atan2(Math.cos(b.a), -Math.sin(b.a) * 1.6) * 0.55;
+          const h = b.r * (1.5 + rnd(i + 70) * 0.9) * (0.8 + 0.2 * Math.sin(ts * 0.03 + i));
+          this.drawFlame(b.x + Math.cos(b.a) * b.r * 0.5, b.y - b.r * 0.35, h, out, Math.floor(ts / 90 + i), lick);
+        });
       }
       const fcy = (minY + cy) / 2;
       ctx.save(); ctx.globalCompositeOperation = 'lighter';

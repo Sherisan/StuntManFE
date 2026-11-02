@@ -1,7 +1,7 @@
-// Base URL of the Worldiator.Server API.
-// Override in dev via a .env file: VITE_API_BASE=http://localhost:5059
-// The .NET dev profile listens on http://localhost:5059 (Properties/launchSettings.json).
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5059';
+// Base URL of the GameEngineAPI (Worldiator.Server) in ./GameEngineAPI.
+// It listens on http://localhost:5003 ("Urls" in its appsettings.json).
+// Override via a .env file: VITE_API_BASE=http://host:port
+export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5003';
 
 export const HUB_URL = `${API_BASE}/gamehub`;
 export const DEV_TOKEN_URL = `${API_BASE}/api/dev-token`;

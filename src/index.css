@@ -84,6 +84,11 @@ button, input, .settings-item, .tab-bar button, .quick button {
   white-space:nowrap; flex-shrink:0;
 }
 .logo .spark { display:inline-block; animation:sparkPulse 2.4s ease-in-out infinite; }
+.logo-word {
+  font-family:var(--num); font-style:italic; font-weight:800; font-size:clamp(15px, 4.4cqw, 19px);
+  letter-spacing:.03em; color:#F4F7FB; text-shadow:0 2px 10px rgba(0,0,0,0.5);
+}
+.logo-word b { color:var(--teal); font-weight:inherit; }
 @keyframes sparkPulse { 0%,100%{ transform:scale(1); filter:drop-shadow(0 0 4px rgba(0,212,170,.6)); } 50%{ transform:scale(1.18); filter:drop-shadow(0 0 12px rgba(0,255,200,.9)); } }
 
 
@@ -874,6 +879,17 @@ input[type=number]:disabled { opacity:.5; }
   .slip-payout small { display:none; }
   .slip-payout b { font-size:14px; }
   .slip-cta { min-height:54px; }
+  /* The header already shows the balance, so the mode tabs take the row */
+  .slip-balance { display:none; }
+  .slip-tabs { flex:1; }
+  .slip-tabs button { flex:1; justify-content:center; }
+  /* Every quick pick in view — no buttons hidden off the edge: the landing
+     picks share one row, each stake's amounts sit on a 3×2 grid, and the
+     auto round counts share one row */
+  .slip-pred .slip-chips, .slip-auto .slip-chips { overflow:visible; }
+  .slip-pred .slip-chips button, .slip-auto .slip-chips button { flex:1 1 0; min-width:0; padding:0 2px; }
+  .slip-bet .slip-chips { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); overflow:visible; }
+  .slip-bet .slip-chips button { min-width:0; height:30px; padding:0 2px; }
 }
 /* Portrait phones of any width keep the two stakes side by side, and short
    phones (an iPhone SE) give the game a little less height so the stakes
@@ -889,6 +905,7 @@ input[type=number]:disabled { opacity:.5; }
   .slip-range { height:28px; }
 }
 @media (max-width:360px) {
+  .slip-pred .slip-chips button, .slip-auto .slip-chips button { font-size:12px; }
   .slip-bet .slip-stepper > button { width:30px; }
   .slip-amount { padding:0 6px; }
   .slip-amount input { font-size:18px; }
@@ -1072,31 +1089,9 @@ input[type=number]:disabled { opacity:.5; }
 .lobby-top-right { display:flex; align-items:center; gap:10px; margin-left:auto; }
 /* Glass panels are solid, lightly graded fills with an inner top highlight —
    no backdrop blur, which would re-blur the moving arena every frame. */
-.lobby-results {
-  display:flex; align-items:center; gap:12px; height:44px; padding:0 7px 0 16px; border-radius:22px;
-  background:linear-gradient(180deg, rgba(20,28,46,0.9), rgba(11,16,28,0.9)); border:1px solid rgba(255,255,255,0.08);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);
-}
-.lobby-results-lbl { font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase; color:#8B97AD; }
-.lobby-results-strip { display:flex; gap:5px; }
-.lobby-chip {
-  min-width:52px; height:30px; padding:0 9px; border-radius:15px;
-  display:inline-flex; align-items:center; justify-content:center;
-  font-family:var(--num); font-size:16px; font-weight:700; border:1px solid transparent;
-}
-.lobby-chip-empty { color:#4A5468; background:rgba(255,255,255,0.03); border-color:rgba(255,255,255,0.05); }
-.lobby-chip-miss  { color:#FF6B7F; background:rgba(255,92,122,0.12); border-color:rgba(255,92,122,0.3); }
-.lobby-chip-win   { color:#5CD6FF; background:rgba(92,214,255,0.12); border-color:rgba(92,214,255,0.3); }
-.lobby-chip-great { color:#2EE59D; background:rgba(46,229,157,0.13); border-color:rgba(46,229,157,0.35); }
-.lobby-chip-top   { color:#FFD23F; background:rgba(255,210,63,0.14); border-color:rgba(255,210,63,0.4); box-shadow:0 0 12px rgba(255,210,63,0.25); }
-
-.lobby-fair, .lobby-balance, .lobby-icon-btn {
+.lobby-balance, .lobby-icon-btn {
   height:44px; border-radius:22px; display:flex; align-items:center; gap:8px;
   box-shadow:inset 0 1px 0 rgba(255,255,255,0.06);
-}
-.lobby-fair {
-  padding:0 15px; font-size:13px; font-weight:600; color:#2EE59D;
-  background:linear-gradient(180deg, rgba(18,44,40,0.92), rgba(10,26,24,0.92)); border:1px solid rgba(46,229,157,0.26);
 }
 .lobby-balance {
   padding:0 18px 0 13px; color:#2EE59D;
@@ -1194,6 +1189,7 @@ input[type=number]:disabled { opacity:.5; }
   font-family:Inter, system-ui, sans-serif; font-size:14px; font-weight:600; white-space:nowrap;
   transition:color .16s, background .16s, box-shadow .16s;
 }
+.lobby-mode-tab { display:none; }
 .lobby-mode:hover { color:#F4F7FB; background:rgba(255,255,255,0.06); }
 .lobby-mode.on {
   color:#03140C; background:linear-gradient(135deg, #2EE59D, #14B97A);
@@ -1206,17 +1202,19 @@ input[type=number]:disabled { opacity:.5; }
     background:
       linear-gradient(0deg, rgba(5,7,13,0.96) 0%, rgba(5,7,13,0.82) 42%, rgba(5,7,13,0.25) 72%, rgba(5,7,13,0.55) 100%);
   }
-  .lobby-results { display:none; }
   .lobby-hero { margin:auto 0 18px; }
   .lobby-dock { align-self:stretch; overflow-x:auto; scrollbar-width:none; }
   .lobby-dock::-webkit-scrollbar { display:none; }
   .lobby-mode { flex:1 0 auto; justify-content:center; }
 }
 @media (max-width: 520px) {
-  .lobby-fair span { display:none; }
-  .lobby-fair { width:44px; padding:0; justify-content:center; }
-  .lobby-mode span { display:none; }
-  .lobby-mode { padding:0 12px; }
+  /* Five even tabs, each a short label under its icon */
+  .lobby-mode-lbl { display:none; }
+  .lobby-mode-tab { display:block; }
+  .lobby-mode {
+    flex:1 1 0; min-width:0; flex-direction:column; justify-content:center; gap:3px;
+    height:54px; padding:0 2px; font-size:10.5px; letter-spacing:.02em;
+  }
   /* Stat cards span the full row (the hero shrink-wraps its children) and
      keep each label and value on one line, so the three cards stay short
      and even. */
@@ -1237,14 +1235,22 @@ input[type=number]:disabled { opacity:.5; }
 }
 /* Phones in portrait: the title and a one-line pitch move up to the top
    left, the Play button and stats sit down by the thumb, and the arena is
-   shortened so its ramp and rider play in the clear middle of the screen. */
+   sized (from --act-top, set by MainMenu) so its ground line — 72% down the
+   canvas — lands just above the Play button: the ramp and rider play right
+   over the thumb zone on every phone height, with no empty strip between. */
 @media (max-width: 600px) and (min-height: 561px) {
-  .lobby-arena { bottom:auto; height:80%; }
+  .lobby { --act-top:62%; }
+  .lobby-arena { bottom:auto; height:calc((var(--act-top) - 38px) / 0.72); }
   .lobby-shade {
     background:
       radial-gradient(150% 62% at 0% 0%, rgba(5,7,13,0.96) 0%, rgba(5,7,13,0.82) 40%, rgba(5,7,13,0) 72%),
-      linear-gradient(0deg, rgba(5,7,13,1) 0%, rgba(5,7,13,0.94) 28%, rgba(5,7,13,0) 46%);
+      linear-gradient(180deg, rgba(5,7,13,0) calc(var(--act-top) - 14px), rgba(5,7,13,0.9) calc(var(--act-top) + 34px), #05070D calc(var(--act-top) + 100px));
   }
+  /* Balance on the left, settings on the right; the balance card in the
+     stats would only repeat it, so streak and top payout share the row */
+  .lobby-top-right { flex:1; margin-left:0; justify-content:space-between; }
+  .lobby-stat-green { display:none; }
+  .lobby-stat-gold { display:flex; }
   .lobby-hero { flex:1; margin:0; padding:12px 0 14px; max-width:none; align-items:stretch; justify-content:space-between; gap:12px; }
   .lobby-intro { align-items:flex-start; text-align:left; gap:7px; }
   .lobby-kicker { font-size:10.5px; letter-spacing:.14em; }
@@ -1266,7 +1272,7 @@ input[type=number]:disabled { opacity:.5; }
   .lobby-title { font-size:clamp(40px, 14vh, 66px); }
   .lobby-desc, .lobby-stats { display:none; }
   .lobby-cta { height:44px; padding:0 22px; font-size:17px; }
-  .lobby-fair, .lobby-balance, .lobby-icon-btn { height:38px; }
+  .lobby-balance, .lobby-icon-btn { height:38px; }
   .lobby-icon-btn { width:38px; }
   .lobby-mode { height:38px; }
   .lobby-dock { padding:4px; }

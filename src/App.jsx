@@ -4,7 +4,7 @@ import BetSlip from './components/BetSlip.jsx';
 import { AccuracyBar, SessionCard, RecentRounds, PayoutRules } from './components/InfoPanels.jsx';
 import { BikeGame } from './game/BikeGame.js';
 import { calcPayout, serverMultToCrashAt, PAYOUT_TIERS } from './game/logic.js';
-import { playWin, playLose, playDeposit, playWithdraw, startAmbient, stopAmbient } from './game/sound.js';
+import { playWin, playLose, playDeposit, playWithdraw, playCountdownBeep, playClick, playBet, gameSfx, unlockAudio, setSoundEnabled, setMusicEnabled } from './game/sound.js';
 import { GameServer } from './api/gameServer.js';
 
 const START_BALANCE = 1000;
@@ -12,7 +12,8 @@ const BET_KEY = 'bikeit_bet';
 const PRED_KEY = 'bikeit_pred';
 const BET2_KEY = 'bikeit_bet2';
 const SOUND_KEY = 'bikeit_sound';
-const MUSIC_KEY = 'bikeit_music';
+// v2: the live stadium music (on by default) replaced the old optional drone
+const MUSIC_KEY = 'bikeit_music_v2';
 const PLAYER_ID_KEY = 'bikeit_player_id';
 const JOINED_KEY = 'bikeit_joined_at';
 const LIFETIME_KEY = 'bikeit_lifetime_stats';
@@ -77,14 +78,32 @@ export default function App() {
 
   const [soundOn, setSoundOn] = useState(() => localStorage.getItem(SOUND_KEY) !== 'off');
   const soundOnRef = useRef(soundOn);
-  useEffect(() => { soundOnRef.current = soundOn; localStorage.setItem(SOUND_KEY, soundOn ? 'on' : 'off'); }, [soundOn]);
+  useEffect(() => {
+    soundOnRef.current = soundOn; localStorage.setItem(SOUND_KEY, soundOn ? 'on' : 'off');
+    setSoundEnabled(soundOn);
+  }, [soundOn]);
+  // Browsers keep audio locked until the player interacts: any tap or key
+  // unlocks it (and brings it back if the tab suspended it). Every button
+  // gives a soft click.
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    const click = (e) => { if (soundOnRef.current && e.target.closest?.('button')) playClick(); };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    window.addEventListener('click', click);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+      window.removeEventListener('click', click);
+    };
+  }, []);
 
-  const [musicOn, setMusicOn] = useState(() => localStorage.getItem(MUSIC_KEY) === 'on');
+  const [musicOn, setMusicOn] = useState(() => localStorage.getItem(MUSIC_KEY) !== 'off');
   useEffect(() => {
     localStorage.setItem(MUSIC_KEY, musicOn ? 'on' : 'off');
-    if (musicOn) startAmbient(); else stopAmbient();
+    setMusicEnabled(musicOn);
   }, [musicOn]);
-  useEffect(() => () => stopAmbient(), []);
+  useEffect(() => () => setMusicEnabled(false), []);
 
   const [playerId] = useState(getOrCreatePlayerId);
   const [joinedAt] = useState(getOrCreateJoinedAt);
@@ -224,6 +243,7 @@ export default function App() {
       },
       onCountdown: (v) => {
         if (v === null) { setCountdown(null); return; }
+        if (soundOnRef.current) playCountdownBeep(v === 0);
         setCountdown(v);
         setCountdownKey(k => k + 1);
       },
@@ -239,6 +259,7 @@ export default function App() {
       },
       onShake: () => { setShaking(false); requestAnimationFrame(() => { setShaking(true); setTimeout(() => setShaking(false), 400); }); },
       onLanded: (dist) => resolveOutcome(dist),
+      onSfx: (name, v) => gameSfx(name, v),
     }, narrow ? { crowdMs: 80, ambientFps: 30, suspended: true } : { crowdMs: 50, ambientFps: 60, suspended: true });
     gameRef.current = game;
     return () => { game.destroy(); gameRef.current = null; };
@@ -430,6 +451,7 @@ export default function App() {
     // outcome; falls back to the engine's local RNG when the server is offline.
     const outcome = serverRef.current?.takeOutcome() || null;
     serverOutcomeRef.current = outcome;
+    if (soundOnRef.current) playBet();
 
     gameRef.current.startRound({
       pred: pred1,
@@ -524,7 +546,6 @@ export default function App() {
         <MainMenu
           balance={balance}
           streak={streak}
-          history={history}
           onPlay={() => setShowMenu(false)}
           onAutoBet={() => setShowMenu(false)}
           onPrepare={() => gameRef.current?.setSuspended(false)}
@@ -535,7 +556,7 @@ export default function App() {
       )}
       <div className="app">
         <header>
-          <div className="logo"><span className="spark">⚡</span></div>
+          <div className="logo"><span className="spark">⚡</span><span className="logo-word">BIKE <b>IT</b></span></div>
           <div className="balance-wrap">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#00ff88" strokeWidth="2.5">
               <circle cx="12" cy="12" r="9" />
@@ -544,7 +565,11 @@ export default function App() {
             </svg>
             <div className="balance bump" key={bumpKey}>R{balance.toFixed(2)}</div>
           </div>
-          <button type="button" className="icon-btn settings-gear" aria-label="Settings" onClick={() => setShowSettings(true)}>⚙</button>
+          <button type="button" className="icon-btn settings-gear" aria-label="Settings" onClick={() => setShowSettings(true)}>
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2.2" /><circle cx="10" cy="17" r="2.2" />
+            </svg>
+          </button>
         </header>
 
         <div className="layout">
@@ -838,7 +863,7 @@ export default function App() {
                 {settingsPage === 'sound' && (
                   <>
                     <div className="settings-row">
-                      <span>Sound Effects</span>
+                      <span>Sound Effects &amp; Crowd</span>
                       <button type="button" className={`switch${soundOn ? ' on' : ''}`}
                         role="switch" aria-checked={soundOn} onClick={() => setSoundOn(s => !s)}>
                         <span className="switch-knob" />
