@@ -260,10 +260,28 @@ export default function App() {
       onShake: () => { setShaking(false); requestAnimationFrame(() => { setShaking(true); setTimeout(() => setShaking(false), 400); }); },
       onLanded: (dist) => resolveOutcome(dist),
       onSfx: (name, v) => gameSfx(name, v),
-    }, narrow ? { crowdMs: 80, ambientFps: 30, suspended: true } : { crowdMs: 50, ambientFps: 60, suspended: true });
+    }, narrow ? { crowdMs: 80, ambientFps: 30, suspended: true, tallSky: true } : { crowdMs: 50, ambientFps: 60, suspended: true, tallSky: true });
     gameRef.current = game;
     return () => { game.destroy(); gameRef.current = null; };
   }, [resolveOutcome]);
+
+  // Tell the engine where the distance panel sits over the canvas, so the
+  // dragon, the birds, the moon and the fireworks keep out from behind it.
+  // Re-measured whenever the panel or the canvas changes size.
+  useEffect(() => {
+    const canvas = canvasRef.current, hud = canvas?.parentElement?.querySelector('.hud');
+    if (!canvas || !hud || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const c = canvas.getBoundingClientRect(), h = hud.getBoundingClientRect();
+      if (!c.width || !h.width) return;
+      gameRef.current?.setClearZone({ left: h.left - c.left, right: h.right - c.left, bottom: h.bottom - c.top });
+    };
+    const ro = new ResizeObserver(update);
+    ro.observe(hud); ro.observe(canvas);
+    update();
+    const settle = setTimeout(update, 600); // after the panel's slide-in
+    return () => { ro.disconnect(); clearTimeout(settle); };
+  }, []);
 
   // The menu runs its own live arena, so the (hidden) game canvas behind it
   // stops rendering until the player leaves the menu.

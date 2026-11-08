@@ -904,6 +904,12 @@ input[type=number]:disabled { opacity:.5; }
   .game-wrap { height:min(100vw, 38dvh); }
   .slip-range { height:28px; }
 }
+/* Portrait phones: the header and the game fill the top 80% of the screen
+   and the bet slip starts below them — scroll down to it. The bet button
+   stays pinned to the bottom edge, so placing a bet is still one tap away. */
+@media (max-width:600px) and (orientation:portrait) {
+  .game-wrap { height:calc(80dvh - 36px - env(safe-area-inset-top)); }
+}
 @media (max-width:360px) {
   .slip-pred .slip-chips button, .slip-auto .slip-chips button { font-size:12px; }
   .slip-bet .slip-stepper > button { width:30px; }

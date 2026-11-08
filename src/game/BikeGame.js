@@ -23,10 +23,10 @@ const WEATHERS = [
 // waiting at the start line has a proper run-up instead of idling right at
 // its foot, and it's sized to the room actually there — a narrow width alone
 // no longer shrinks it to a sliver beside a full-size bike.
-function computeRamp(W, H) {
+function computeRamp(W, H, groundFrac = 0.72) {
   const portrait = H > W;
   const s = Math.max(0.55, Math.min(1.2, H / 560, W / (portrait ? 380 : 500)));
-  const gY = H * 0.72;
+  const gY = H * groundFrac;
   const rx = W * (portrait ? 0.45 : 0.40);
   const rw = 150 * s;
   const rh = 146 * s;
@@ -123,15 +123,24 @@ const TRICK_LABELS = {
 // ── Wreckage ────────────────────────────────────────────────────────────────
 // A "biker graveyard" scattered along the track: the remains of past riders
 // who didn't stick the landing. Each item (a tire, a skull, a bone, a helmet,
-// a smoking frame, a memorial cross, a bull skull, boulders) lands on its own,
-// independently placed — not bundled into one pile — so the sand reads as
-// scattered debris rather than a cluster.
+// a smoking frame, a memorial cross, a bull skull, boulders, a burning oil
+// drum, straw bales, a cactus, a dead tree, a warning sign, a tumbleweed)
+// lands on its own, independently placed — not bundled into one pile — so
+// the sand reads as scattered debris rather than a cluster.
 const WRECK_KINDS = ['tireLean', 'tireFlat', 'skull', 'bone', 'helmet', 'brokenBiker', 'dinoBones', 'humanSkeleton',
-  'cowSkull', 'graveCross', 'rocks'];
+  'cowSkull', 'graveCross', 'rocks', 'barrel', 'hayBales', 'cactus', 'deadTree', 'warningSign', 'tumbleweed'];
+// Props that stand up straight (they barely tilt with the ground) and draw
+// their own shadows
+const UPRIGHT_PROPS = new Set(['barrel', 'hayBales', 'cactus', 'deadTree', 'warningSign']);
 // The stand's background repaint is split into this many short stages
 // (bowl, five slices of seat rows, then haze/aisles/roof) — see
 // paintCrowdStage / ensureCrowdLayer.
 const CROWD_STAGES = 7;
+// The dragon's head rig, shared by drawDragon and dragonMouth (in the
+// dragon's own units, facing right): the neck pivots at `pivot`, the head
+// sits at the end of it at `head`, turned by `headRot` and scaled by
+// `headScale`, and fire leaves the mouth at `mouth` in the head's units.
+const DRAGON = { pivot: [9, -3.4], head: [25, -13], headRot: 0.14, headScale: 1.32, mouth: [12.5, 1.7] };
 
 export class BikeGame {
   // `options.viewShift` (fraction of canvas width) pushes the track, ramp and
@@ -147,6 +156,8 @@ export class BikeGame {
     this.ctx = canvas.getContext('2d');
     this.cb = callbacks;
     this.viewShift = options.viewShift || 0;
+    // A tall portrait view gives its extra height to the sky (see groundFrac)
+    this.tallSky = !!options.tallSky;
     this.ambientFps = options.ambientFps || 30;
     this.crowdMs = options.crowdMs || 70;
     this.maxDpr = options.maxDpr || 2;
@@ -276,7 +287,32 @@ export class BikeGame {
     return v + (target - v) * (1 - Math.pow(1 - k, dt));
   }
 
-  getRamp() { if (!this.R) this.R = computeRamp(this.cw, this.ch); return this.R; }
+  getRamp() { if (!this.R) this.R = computeRamp(this.cw, this.ch, this.groundFrac()); return this.R; }
+
+  // Where the ground line sits, as a fraction of the canvas height. With
+  // `tallSky`, a tall portrait view puts its extra height into the sky: the
+  // ground stays about as deep as it would be on a square view.
+  groundFrac() {
+    const W = this.cw, H = this.ch;
+    return this.tallSky && H > W * 1.25 ? Math.min(0.84, Math.max(0.72, 1 - (0.3 * W) / H)) : 0.72;
+  }
+
+  // The distance panel's box over the canvas ({ left, right, bottom } in
+  // canvas px), from the UI: nothing that flies goes behind it.
+  setClearZone(zone) { this.clearZone = zone; }
+
+  // The open sky the flyers keep to: below the distance panel (see
+  // setClearZone) and above the stand's roof. `y(v)` maps a height in the
+  // whole sky (0 … roof) into that band, so everything keeps its place
+  // relative to everything else.
+  skyBand(W, H) {
+    const g = this.standGeom(W, H, this.getRamp().gY), roof = g.standTop - g.roofH - g.trussH;
+    const top = this._zoneBottom != null ? Math.min(roof - 60, this._zoneBottom + 6) : 0;
+    return { top, roof, y: (v) => top + (v / roof) * (roof - top) };
+  }
+
+  // Height of the groomed track strip along the ground line
+  trackHeight(W, H) { return TRACK_FRAC * (this.tallSky ? Math.min(H, W * 1.15) : H); }
 
   calcMult(ms) { return Math.pow(1 + ms / 9000, 2.7); }
   // Metres past the launch lip; one metre is 1/0.22 px at full size, scaled
@@ -577,6 +613,9 @@ export class BikeGame {
       // above its anchor point) never overlaps it.
       this.camTargetY = this.by < r.gY - H * 0.05 ? Math.max(0, H * 0.5 - this.by) : 0;
       this.camY = this.camLerp(this.camY, this.camTargetY, 0.06, camDt);
+      // And a hard limit: the rider and its trick label never ride up under
+      // the distance panel, even while the eased camera is catching up
+      if (this._zoneCam != null) this.camY = Math.max(this.camY, this._zoneCam + (this.trick?.top || 72) + 38 - this.by);
 
       if (this.mult >= this.crashAt) { this.mult = this.crashAt; this.pendingCrash = true; }
 
@@ -843,6 +882,13 @@ export class BikeGame {
   // and then draws the flyers (which do need to move every frame) on top.
   drawSky(W, H, ts) {
     const ctx = this.ctx;
+    const zb = this.clearZone?.bottom;
+    // Flyers drift to a new band slowly; the camera limit follows quickly
+    if (zb == null) this._zoneBottom = this._zoneCam = null;
+    else {
+      this._zoneBottom = this._zoneBottom == null ? zb : this._zoneBottom + (zb - this._zoneBottom) * 0.06;
+      this._zoneCam = this._zoneCam == null ? zb : this._zoneCam + (zb - this._zoneCam) * 0.25;
+    }
     this.ensureSkyLayer(W, H, ts);
     ctx.drawImage(this._skyCanvas, 0, 0, W, H);
     this.drawShootingStar(W, H, ts);
@@ -971,8 +1017,13 @@ export class BikeGame {
     const g = this.standGeom(W, H, this.getRamp().gY);
     const trussTop = g.standTop - g.roofH - g.trussH;
     const R = Math.max(34, Math.min(80, H * 0.088));
-    const y = Math.max(R + 12, Math.min(H * 0.15, trussTop - 30 - R));
-    return { x: W * 0.8, y, R };
+    let x = W * 0.8, y = Math.max(R + 12, Math.min(H * 0.15, trussTop - 30 - R));
+    const z = this.clearZone;
+    if (z && x + R > z.left - 8 && x - R < z.right + 8 && y - R < z.bottom + 8) {
+      if (z.right + 8 + R * 2 < W - 4) x = z.right + 8 + R;
+      else y = z.bottom + 8 + R;
+    }
+    return { x, y, R };
   }
 
   // The moon's disc, rendered once per size into its own canvas: bright
@@ -1124,7 +1175,8 @@ export class BikeGame {
     const k = Math.floor(ts / period);
     const r = (n) => { const v = Math.sin((k * 7.13 + n) * 91.7) * 43758.5453; return v - Math.floor(v); };
     const ang = 0.32 + r(3) * 0.28, len = 120 + r(4) * 90;
-    const x0 = W * (0.12 + r(1) * 0.6), y0 = H * (0.03 + r(2) * 0.12);
+    const sky = this.skyBand(W, H), x0 = W * (0.12 + r(1) * 0.6);
+    const y0 = this._zoneBottom != null ? sky.top + Math.sin(ang) * len + 4 + r(2) * 20 : H * (0.03 + r(2) * 0.12);
     const hx = x0 + Math.cos(ang) * len * t * 1.7, hy = y0 + Math.sin(ang) * len * t * 1.7;
     const a = Math.sin(t * Math.PI);
     const ctx = this.ctx;
@@ -1138,20 +1190,13 @@ export class BikeGame {
     ctx.fillStyle = head; ctx.fillRect(hx - 5, hy - 5, 10, 10);
   }
 
-  // Night birds. 'far' is a loose skein of gulls crossing high and slow, each
-  // bobbing on its own; 'near' is a barn owl gliding across the face of the
-  // moon now and then, two gulls closer in, and the odd pterosaur.
+  // Night birds. 'far' is a loose skein of gulls crossing high and slow,
+  // each bobbing on its own; 'near' is a barn owl gliding across the face of
+  // the moon now and then, two gulls closer in, and the dragon on patrol.
   drawFlyers(W, H, ts, layer) {
     if (layer === 'far') {
-      // A pair of vultures riding the warm air over the arena, circling
-      // high above the bone yard on wide, steady wings
-      const vs = Math.max(13, Math.min(24, W / 52));
-      [[0.3, 0.13, 0, 1], [0.7, 0.08, 2.4, 0.82]].forEach(([fx, fy, off, k], i) => {
-        const th = ts * 0.00042 * (i ? -1 : 1) + off, R = W * 0.11;
-        this.drawVulture(W * fx + Math.cos(th) * R, H * fy + Math.sin(th) * R * 0.28, vs * k, -Math.sin(th) * (i ? -1 : 1), ts * 0.004 + i * 2);
-      });
-      const t = ((ts + 6000) % 30000) / 30000;
-      const lx = -170 + t * (W + 440), ly = H * 0.1 + Math.sin(t * 9) * 5;
+      const t = ((ts + 6000) % 30000) / 30000, sky = this.skyBand(W, H);
+      const lx = -170 + t * (W + 440), ly = Math.max(sky.y(H * 0.1), sky.top + 26) + Math.sin(t * 9) * 5;
       [[0, 0, 7], [-16, -7, 6.4], [-15, 8, 6.6], [-31, -13, 6], [-30, 15, 6.2], [-47, -19, 5.6], [-45, 22, 5.8], [-62, -24, 5.1], [-60, 28, 5.3]]
         .forEach(([dx, dy, s], i) => {
           const bob = Math.sin(ts * 0.0016 + i * 1.3) * 1.6;
@@ -1159,18 +1204,18 @@ export class BikeGame {
         });
       return;
     }
-    const moon = this._moon || { x: W * 0.8, y: H * 0.15, R: 50 };
+    const moon = this._moon || { x: W * 0.8, y: H * 0.15, R: 50 }, sky = this.skyBand(W, H);
     const ot = ((ts + 3000) % 30000) / 30000;
     if (ot < 0.5) {
-      const ox = -130 + (ot / 0.5) * (W + 270);
-      this.drawOwl(ox, moon.y + moon.R * 0.12 + Math.sin(ot * Math.PI * 6) * 5, Math.max(16, moon.R * 0.42), ts * 0.0042);
+      const ox = -130 + (ot / 0.5) * (W + 270), os = Math.max(16, moon.R * 0.42);
+      this.drawOwl(ox, Math.max(moon.y + moon.R * 0.12, sky.top + os) + Math.sin(ot * Math.PI * 6) * 5, os, ts * 0.0042);
     }
     [
       { y: H * 0.25, period: 23000, off: 11000, size: 22, wf: 0.011 },
       { y: H * 0.18, period: 29000, off: 21000, size: 17, wf: 0.012 },
     ].forEach((b, i) => {
       const t = ((ts + b.off) % b.period) / b.period;
-      this.drawGull(-90 + t * (W + 200), b.y + Math.sin(t * Math.PI * 4 + i) * 7, b.size, ts * b.wf + i * 1.7);
+      this.drawGull(-90 + t * (W + 200), Math.max(sky.y(b.y), sky.top + b.size * 1.2) + Math.sin(t * Math.PI * 4 + i) * 7, b.size, ts * b.wf + i * 1.7);
     });
     // The dragon on patrol: every seven seconds it builds fire in its throat,
     // dips its head, opens up and breathes a short burst, then smoke curls
@@ -1209,9 +1254,14 @@ export class BikeGame {
     const d = this._dragon || (this._dragon = { mode: 'patrol', x: -999, y: 0, facing: 1, t0: 0, ts: null });
     const step = d.ts == null ? 1 : Math.min(3, Math.max(0.1, (ts - d.ts) / 16.6667));
     d.ts = ts;
-    d.scale = Math.max(1, Math.min(1.75, W / 760));
+    // It comes in closer — bigger — to attack, and shrinks back to patrol
+    const close = d.mode === 'swoop' || d.mode === 'blast' || d.mode === 'leave';
+    const base = Math.max(1, Math.min(1.75, W / 760)), sky = this.skyBand(W, H);
+    const fit = Math.min(1, (sky.roof - sky.top) / (95 * base));
+    d.zoom = (d.zoom ?? fit) + ((close ? 1.3 : fit) - (d.zoom ?? fit)) * (1 - Math.pow(0.95, step));
+    d.scale = base * d.zoom;
     const pt = ((ts + 19000) % 36000) / 36000;
-    const px = -160 + pt * (W + 340), py = H * 0.09 + Math.sin(pt * 8) * 6;
+    const px = -160 + pt * (W + 340), py = Math.max(sky.y(H * 0.09), sky.top + 46 * d.scale) + Math.sin(pt * 8) * 6;
     const flying = this.phase === 'flying';
     const rider = { x: this.bx - this.camX, y: this.by + this.camY - 30 * BIKE_SCALE };
 
@@ -1221,13 +1271,13 @@ export class BikeGame {
       this._attack = false;
       d.mode = 'swoop';
       this.cb.onSfx?.('dragon-roar');
-      if (!onScreen) { d.x = W + 90; d.y = -50; }
+      if (!onScreen) { d.x = W + 90; d.y = Math.max(H * 0.3, sky.top + 50 * d.scale); }
     }
     if (d.mode === 'patrol') { d.x = px; d.y = py; d.facing = 1; return d; }
     if (d.mode === 'away') { if (px < -60 || px > W + 60) d.mode = 'patrol'; return d; }
     if (d.mode === 'swoop' || d.mode === 'blast') {
       if (!flying) { d.mode = 'leave'; return d; }
-      const tx = rider.x + 125 * d.scale, ty = rider.y - 62 * d.scale;
+      const tx = rider.x + 125 * d.scale, ty = Math.max(rider.y - 62 * d.scale, sky.top + 48 * d.scale);
       const k = 1 - Math.pow(1 - 0.09, step);
       d.x += (tx - d.x) * k; d.y += (ty - d.y) * k;
       d.facing = rider.x < d.x ? -1 : 1;
@@ -1235,8 +1285,9 @@ export class BikeGame {
       if (d.mode === 'blast' && ts - d.t0 > 950) d.mode = 'leave';
       return d;
     }
-    // leave: climb away off the top/right, then wait for the next patrol pass
-    d.x += 5.5 * step; d.y -= 3.4 * step; d.facing = 1;
+    // leave: climb gently away off to the right, then wait for the next
+    // patrol pass
+    d.x += 6 * step; d.y = Math.max(sky.top + 46 * d.scale, d.y - 1.2 * step); d.facing = 1;
     if (d.y < -90 || d.x > W + 140) d.mode = 'away';
     return d;
   }
@@ -1246,9 +1297,11 @@ export class BikeGame {
   // head tilt. Mirrors drawDragon's transforms: the neck pivots at its
   // base, the head sits tipped down slightly at the end of it.
   dragonMouth(d, phase, tilt) {
-    const a = tilt + Math.sin(phase * 0.5 + 1) * 0.07, ox = 35 - 8.5, oy = -7.6 + 3.5;
-    const mx = 8.5 + ox * Math.cos(a) - oy * Math.sin(a), my = -3.5 + ox * Math.sin(a) + oy * Math.cos(a);
-    return { x: d.x + mx * d.scale * d.facing, y: d.y + Math.sin(phase) * 2.4 + my * d.scale, a: a + 0.08 };
+    const { pivot: [px, py], head: [hx, hy], headRot: hr, headScale: hs, mouth: [lx, ly] } = DRAGON;
+    const ox = hx + hs * (lx * Math.cos(hr) - ly * Math.sin(hr)) - px, oy = hy + hs * (lx * Math.sin(hr) + ly * Math.cos(hr)) - py;
+    const a = tilt + Math.sin(phase * 0.5 + 1) * 0.07;
+    const mx = px + ox * Math.cos(a) - oy * Math.sin(a), my = py + ox * Math.sin(a) + oy * Math.cos(a);
+    return { x: d.x + mx * d.scale * d.facing, y: d.y + Math.sin(phase) * 2.4 + my * d.scale, a: a + hr };
   }
 
   // The attacking dragon and its fire, in screen space on top of the world.
@@ -1646,154 +1699,90 @@ export class BikeGame {
     ctx.restore();
   }
 
-  // A soaring vulture seen from below, gliding on a circle: broad, plank-
-  // like wings held flat with a slight lift, the big primaries splayed into
-  // six separate fingers at each tip, a pale band along the flight feathers
-  // catching the moon, a short wedge tail, and a small bald head on a white
-  // ruff. `dir` (-1…1) is which way it's heading round the circle — it
-  // banks into the turn, one wing dipping and foreshortening — and `phase`
-  // drives an occasional slow wingbeat between long glides.
-  drawVulture(x, y, size, dir, phase) {
-    const ctx = this.ctx;
-    const cyc = phase % 12, beat = cyc < 1.6 ? Math.sin((cyc / 1.6) * Math.PI * 2) * 0.12 : 0;
-    const face = dir < 0 ? -1 : 1, bank = dir * 0.22;
-    ctx.save(); ctx.translate(x, y); ctx.rotate(bank); ctx.scale(face, 1);
-    const DARK = '#1B1412', MID = '#3A2D27', BAND = 'rgba(168,160,150,0.55)';
-    // One wing: `s` = +1 forward (toward the head side) is the near one;
-    // the far one foreshortens with the bank
-    const wing = (s) => {
-      const span = size * (s > 0 ? 1 : 0.92) * (1 - Math.abs(dir) * 0.12 * (s < 0 ? 1 : 0));
-      const lift = -size * (0.08 + beat) * s * s;
-      ctx.beginPath();
-      ctx.moveTo(0, -size * 0.1);
-      ctx.quadraticCurveTo(span * 0.45, -size * 0.2 + lift, span * 0.82, -size * 0.16 + lift * 1.4);
-      // Six fingered primaries at the tip, splayed apart
-      for (let fgr = 0; fgr < 6; fgr++) {
-        const a = -0.55 + fgr * 0.2, L = size * (0.3 - Math.abs(fgr - 2.2) * 0.025);
-        const bx = span * (0.82 - fgr * 0.012), by = -size * (0.16 - fgr * 0.07) + lift * 1.4;
-        ctx.lineTo(bx + Math.cos(a) * L, by + Math.sin(a) * L);
-        ctx.lineTo(bx + Math.cos(a) * L * 0.15, by + Math.sin(a) * L * 0.15 + size * 0.045);
-      }
-      ctx.quadraticCurveTo(span * 0.5, size * 0.3 + lift, 0, size * 0.22);
-      ctx.closePath();
-    };
-    [1, -1].forEach((s) => {
-      ctx.save(); ctx.scale(s, 1);
-      wing(s);
-      const wg = ctx.createLinearGradient(0, -size * 0.2, 0, size * 0.3);
-      wg.addColorStop(0, MID); wg.addColorStop(1, DARK);
-      ctx.fillStyle = wg; ctx.fill();
-      // The pale band of flight feathers along the back half of the wing
-      ctx.save(); wing(s); ctx.clip();
-      ctx.strokeStyle = BAND; ctx.lineWidth = size * 0.1;
-      ctx.beginPath(); ctx.moveTo(size * 0.06, size * 0.17); ctx.quadraticCurveTo(size * 0.5, size * 0.2, size * 0.8, size * 0.02); ctx.stroke();
-      ctx.restore();
-      ctx.strokeStyle = 'rgba(190,206,236,0.35)'; ctx.lineWidth = Math.max(0.6, size * 0.035);
-      ctx.beginPath(); ctx.moveTo(0, -size * 0.1); ctx.quadraticCurveTo(size * 0.45, -size * 0.2, size * 0.8, -size * 0.17); ctx.stroke();
-      ctx.restore();
+  // A bird's wing on a simple 3D rig, as screen points. `pts` lay the wing
+  // out flat as [u, v, h] — u along the body (+ forward), v out along the
+  // span, h how far toward the hand (0 the arm, 1 the hand) — and each point
+  // swings up about the body's axis by the arm's angle `ta`, blended toward
+  // the lagging hand's `th`, from the shoulder (sx, sy), seen from a little
+  // above (KY) and behind (KX). `zs` is +1 for the near wing, -1 for the far.
+  wingPoints(pts, sx, sy, ta, th, zs, KX = -0.1, KY = 0.32) {
+    return pts.map(([u, v, h]) => {
+      const t = ta + (th - ta) * h, z = v * Math.cos(t) * zs;
+      return { x: sx + u + z * KX, y: sy - v * Math.sin(t) + z * KY };
     });
-    // Body and wedge tail
-    ctx.fillStyle = DARK;
-    ctx.beginPath(); ctx.ellipse(0, size * 0.04, size * 0.12, size * 0.3, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.moveTo(-size * 0.1, size * 0.26); ctx.lineTo(-size * 0.14, size * 0.5); ctx.lineTo(size * 0.14, size * 0.5); ctx.lineTo(size * 0.1, size * 0.26); ctx.closePath(); ctx.fill();
-    // White ruff and the bald, hook-beaked head
-    ctx.fillStyle = '#D9D2C8';
-    ctx.beginPath(); ctx.ellipse(0, -size * 0.2, size * 0.1, size * 0.07, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#B88A80';
-    ctx.beginPath(); ctx.ellipse(0, -size * 0.31, size * 0.06, size * 0.085, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#E8DCC0';
-    ctx.beginPath(); ctx.moveTo(-size * 0.03, -size * 0.38); ctx.quadraticCurveTo(0, -size * 0.47, size * 0.03, -size * 0.38); ctx.closePath(); ctx.fill();
-    ctx.restore();
   }
 
-  // A side-on gull flying right. Long wings bend at the wrist — the hand
-  // trailing the arm through every beat — each built from feathers: soft
-  // grey coverts, a row of secondaries with the white trailing edge gulls
-  // have, and five fingered black primaries with white "mirror" spots that
-  // fan apart on the downstroke. A streamlined body, grey on the back and
-  // white below, warm-lit by the stadium underneath and rimmed by the moon
-  // on top; a white head with a dark glinting eye, a yellow bill with its
+  // How much a wing at angle `t` shows us its underside (> 0) rather than
+  // its top: the near wing once raised, the far wing only when well down.
+  wingUnder(t, zs, KY = 0.32) {
+    return zs > 0 ? Math.sin(t) - KY * Math.cos(t) : -(Math.sin(t) + KY * Math.cos(t));
+  }
+
+  // A side-on gull flying right. Its long wings beat on the 3D rig: the near
+  // one sweeps down past the white belly and rises to show its pale
+  // underside with inky tips; at rest in a glide it's seen from just above —
+  // the grey back of the wing, black primaries with white "mirror" spots
+  // and a white trailing edge — while the far wing peeks over the back. The
+  // hand trails the arm and tucks in on the upstroke. A streamlined body,
+  // grey on the back and white below, warm-lit by the stadium and rimmed by
+  // the moon; a white head with a dark glinting eye, a yellow bill with its
   // red spot, a white tail and pink feet tucked up.
   drawGull(x, y, size, phase) {
     const ctx = this.ctx;
-    const cyc = phase % (Math.PI * 6);
-    const glide = cyc >= Math.PI * 4;
-    const fa = glide ? 0.16 : Math.sin(cyc), fh = glide ? 0.08 : Math.sin(cyc - 0.65);
-    const spread = glide ? 0.55 : 0.35 + 0.65 * Math.max(0, -Math.cos(cyc)); // primaries fan apart on the downstroke
+    const cyc = phase % (Math.PI * 6), glide = cyc >= Math.PI * 4;
+    const ta = glide ? 0.14 + Math.sin(cyc * 0.5) * 0.03 : 0.22 + 0.85 * Math.sin(cyc);
+    const th = glide ? 0.1 : 0.22 + 0.85 * Math.sin(cyc - 0.6);
+    const fold = glide ? 0 : Math.max(0, Math.cos(cyc - 0.3)) * 0.2;
     ctx.save(); ctx.translate(x, y); ctx.scale(size, size);
     ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-
-    const wing = (k, ox, oy, near) => {
-      const S = { x: 0.16 + ox, y: -0.1 + oy };
-      const Wr = { x: -0.04 + ox, y: -0.1 + oy - 0.56 * fa * k };
-      const T = { x: -0.52 + ox + 0.1 * Math.abs(fh), y: Wr.y - 0.64 * fh * k - 0.03 };
-      const R = { x: -0.34 + ox, y: 0.0 + oy };
-      const hx = T.x - Wr.x, hy = T.y - Wr.y, hl = Math.hypot(hx, hy) || 1, hux = hx / hl, huy = hy / hl;
-      const sgn = -huy < 0 ? 1 : -1, bk = { x: -huy * sgn, y: hux * sgn }; // across the hand, toward the trailing side
-      const P5 = { x: Wr.x + bk.x * 0.11 - 0.03, y: Wr.y + bk.y * 0.11 + 0.02 };
-      const outline = () => {
-        ctx.beginPath(); ctx.moveTo(S.x, S.y);
-        ctx.quadraticCurveTo(0.12 + ox, (Wr.y - 0.1 + oy) / 2 - 0.05, Wr.x, Wr.y);
-        ctx.quadraticCurveTo((Wr.x + T.x) / 2, (Wr.y + T.y) / 2 - 0.03, T.x, T.y);
-        ctx.quadraticCurveTo((T.x + P5.x) / 2 + bk.x * 0.07, (T.y + P5.y) / 2 + bk.y * 0.07, P5.x, P5.y);
-        // Secondaries: a row of rounded feather tips back to the body
-        for (let j = 1; j <= 5; j++) {
-          const t0 = (j - 1) / 5, t1 = j / 5;
-          const ax = P5.x + (R.x - P5.x) * t0, ay = P5.y + (R.y - P5.y) * t0, cx2 = P5.x + (R.x - P5.x) * t1, cy2 = P5.y + (R.y - P5.y) * t1;
-          ctx.quadraticCurveTo((ax + cx2) / 2 + bk.x * 0.05, (ay + cy2) / 2 + bk.y * 0.05 + 0.02, cx2, cy2);
+    const lay = (pts) => pts.map(([u, v, h]) => [u - fold * 0.3 * h, v * (1 - fold * h), h]);
+    const OUT = lay([[0, 0, 0], [0.05, 0.24, 0], [0.03, 0.46, 0.3], [-0.1, 0.74, 1], [-0.36, 1.06, 1],
+      [-0.41, 0.95, 1], [-0.4, 0.84, 1], [-0.37, 0.73, 1], [-0.33, 0.62, 1],
+      [-0.31, 0.5, 0.6], [-0.33, 0.38, 0.3], [-0.34, 0.26, 0.15], [-0.35, 0.14, 0], [-0.34, 0.03, 0]]);
+    const HAND_TOP = lay([[-0.06, 0.66, 1], [-0.36, 1.06, 1], [-0.41, 0.95, 1], [-0.4, 0.84, 1], [-0.37, 0.73, 1], [-0.33, 0.62, 1], [-0.22, 0.6, 1]]);
+    const HAND_UNDER = lay([[-0.2, 0.86, 1], [-0.36, 1.06, 1], [-0.41, 0.95, 1], [-0.4, 0.84, 1], [-0.33, 0.8, 1]]);
+    const SHAFTS = lay([[-0.1, 0.68, 1], [-0.41, 0.95, 1], [-0.14, 0.64, 1], [-0.4, 0.84, 1], [-0.18, 0.6, 1], [-0.37, 0.73, 1]]);
+    const MIRRORS = lay([[-0.32, 0.98, 1], [-0.355, 0.88, 1]]);
+    const wing = (sx, sy, zs) => {
+      const P = (pts) => this.wingPoints(pts, sx, sy, ta, th, zs, -0.18, 0.5);
+      const O = P(OUT), k = Math.max(0, Math.min(1, this.wingUnder(ta * 0.6 + th * 0.4, zs, 0.5) * 2.2 + 0.5)), dim = zs > 0 ? 1 : 0.72;
+      const path = () => {
+        ctx.beginPath(); ctx.moveTo(O[0].x, O[0].y);
+        ctx.quadraticCurveTo(O[1].x, O[1].y, (O[1].x + O[2].x) / 2, (O[1].y + O[2].y) / 2);
+        ctx.quadraticCurveTo(O[2].x, O[2].y, (O[2].x + O[3].x) / 2, (O[2].y + O[3].y) / 2);
+        ctx.quadraticCurveTo(O[3].x, O[3].y, O[4].x, O[4].y);
+        for (let i = 5; i < O.length; i++) {
+          const a = O[i - 1], b = O[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+          ctx.quadraticCurveTo(mx + (O[2].x - mx) * 0.14, my + (O[2].y - my) * 0.14, b.x, b.y);
         }
-        ctx.quadraticCurveTo(-0.2 + ox, -0.04 + oy, S.x, S.y);
         ctx.closePath();
       };
-      const g = ctx.createLinearGradient(0, Math.min(T.y, Wr.y), 0, 0.05);
-      g.addColorStop(0, near ? '#B8C3D4' : '#5E6B82'); g.addColorStop(1, near ? '#8796AE' : '#465269');
-      outline(); ctx.fillStyle = g; ctx.fill();
-      ctx.save(); outline(); ctx.clip();
-      // The hand darkens to black toward the tip; a line marks the coverts
-      const M = { x: Wr.x + hx * 0.5, y: Wr.y + hy * 0.5 }, E2 = { x: T.x + hx * 0.3, y: T.y + hy * 0.3 };
-      ctx.fillStyle = near ? '#171A22' : '#0C0E13';
-      ctx.beginPath();
-      ctx.moveTo(M.x - bk.x * 0.3, M.y - bk.y * 0.3); ctx.lineTo(M.x + bk.x * 0.5, M.y + bk.y * 0.5);
-      ctx.lineTo(E2.x + bk.x * 0.5, E2.y + bk.y * 0.5); ctx.lineTo(E2.x - bk.x * 0.3, E2.y - bk.y * 0.3); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = near ? 'rgba(60,70,90,0.45)' : 'rgba(10,14,22,0.5)'; ctx.lineWidth = 0.012;
-      ctx.beginPath(); ctx.moveTo(S.x - 0.02, S.y + 0.03); ctx.quadraticCurveTo((S.x + Wr.x) / 2 - 0.08, (S.y + Wr.y) / 2 + 0.06, Wr.x - 0.07, Wr.y + 0.05); ctx.stroke();
-      ctx.restore();
-      // Primaries: five long pointed black feathers that carry the wingtip
-      // on past the hand, the inner ones swinging back as they fan apart on
-      // the downstroke, the outer two with white mirror spots
-      for (let j = 4; j >= 0; j--) {
-        const t = j / 4, base = { x: Wr.x + hx * (1 - t * 0.5), y: Wr.y + hy * (1 - t * 0.5) };
-        const a = sgn * (0.08 + t * (0.32 + spread * 0.42)), c = Math.cos(a), s = Math.sin(a);
-        const dx = hux * c - huy * s, dy = hux * s + huy * c, len = 0.27 - t * 0.07, w = 0.036 - t * 0.004, px = -dy, py = dx;
-        const tip = { x: base.x + dx * len, y: base.y + dy * len };
-        ctx.beginPath();
-        ctx.moveTo(base.x + px * w, base.y + py * w);
-        ctx.quadraticCurveTo(base.x + dx * len * 0.6 + px * w * 1.15, base.y + dy * len * 0.6 + py * w * 1.15, tip.x, tip.y);
-        ctx.quadraticCurveTo(base.x + dx * len * 0.6 - px * w * 1.15, base.y + dy * len * 0.6 - py * w * 1.15, base.x - px * w, base.y - py * w);
-        ctx.closePath();
-        ctx.fillStyle = near ? '#171A22' : '#0C0E13'; ctx.fill();
-        ctx.strokeStyle = near ? 'rgba(110,120,140,0.55)' : 'rgba(40,46,60,0.6)'; ctx.lineWidth = 0.008; ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(base.x + dx * len * 0.85, base.y + dy * len * 0.85); ctx.stroke();
-        if (j < 2) {
-          ctx.fillStyle = near ? 'rgba(244,247,252,0.95)' : 'rgba(200,208,222,0.6)';
-          ctx.beginPath(); ctx.ellipse(base.x + dx * len * 0.74, base.y + dy * len * 0.74, 0.03, 0.018, Math.atan2(dy, dx), 0, Math.PI * 2); ctx.fill();
-        }
-      }
-      // White trailing edge along the secondaries
-      ctx.strokeStyle = near ? 'rgba(246,248,252,0.9)' : 'rgba(170,180,198,0.5)'; ctx.lineWidth = 0.028;
-      ctx.beginPath(); ctx.moveTo(P5.x, P5.y);
-      for (let j = 1; j <= 5; j++) {
-        const t0 = (j - 1) / 5, t1 = j / 5;
-        const ax = P5.x + (R.x - P5.x) * t0, ay = P5.y + (R.y - P5.y) * t0, cx2 = P5.x + (R.x - P5.x) * t1, cy2 = P5.y + (R.y - P5.y) * t1;
-        ctx.quadraticCurveTo((ax + cx2) / 2 + bk.x * 0.05, (ay + cy2) / 2 + bk.y * 0.05 + 0.02, cx2, cy2);
-      }
+      const mixc = (a, b) => `rgb(${a.map((v, i) => Math.round((v + (b[i] - v) * k) * dim)).join(',')})`;
+      const g = ctx.createLinearGradient(O[2].x, O[2].y, O[10].x, O[10].y);
+      g.addColorStop(0, mixc([172, 184, 204], [244, 240, 236])); g.addColorStop(1, mixc([126, 140, 166], [236, 214, 186]));
+      path(); ctx.fillStyle = g; ctx.fill();
+      ctx.save(); path(); ctx.clip();
+      const hand = P(k > 0.5 ? HAND_UNDER : HAND_TOP);
+      ctx.fillStyle = zs > 0 ? '#14171F' : '#0B0D12';
+      ctx.beginPath(); hand.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y))); ctx.closePath(); ctx.fill();
+      const sh = P(SHAFTS);
+      ctx.strokeStyle = k > 0.5 ? 'rgba(200,206,220,0.4)' : 'rgba(110,120,140,0.55)'; ctx.lineWidth = 0.012; ctx.beginPath();
+      for (let i = 0; i < sh.length; i += 2) { ctx.moveTo(sh[i].x, sh[i].y); ctx.lineTo(sh[i + 1].x, sh[i + 1].y); }
       ctx.stroke();
-      if (near) {
-        ctx.strokeStyle = 'rgba(226,236,255,0.7)'; ctx.lineWidth = 0.02;
-        ctx.beginPath(); ctx.moveTo(S.x, S.y - 0.01); ctx.quadraticCurveTo(0.12 + ox, (Wr.y - 0.1 + oy) / 2 - 0.06, Wr.x, Wr.y - 0.01); ctx.stroke();
+      ctx.fillStyle = `rgba(246,248,252,${zs > 0 ? 0.95 : 0.6})`;
+      P(MIRRORS).forEach((m) => { ctx.beginPath(); ctx.arc(m.x, m.y, 0.026, 0, Math.PI * 2); ctx.fill(); });
+      ctx.restore();
+      // White trailing edge along the secondaries, and the moon on the
+      // leading edge when we see the top
+      ctx.strokeStyle = `rgba(246,248,252,${(0.9 - k * 0.5) * dim})`; ctx.lineWidth = 0.03;
+      ctx.beginPath(); ctx.moveTo(O[9].x, O[9].y); for (let i = 10; i < O.length; i++) ctx.lineTo(O[i].x, O[i].y); ctx.stroke();
+      if (zs > 0) {
+        ctx.strokeStyle = k > 0.5 ? 'rgba(255,200,140,0.5)' : 'rgba(226,236,255,0.75)'; ctx.lineWidth = 0.02;
+        ctx.beginPath(); ctx.moveTo(O[0].x, O[0].y - 0.01); ctx.quadraticCurveTo(O[1].x, O[1].y - 0.01, O[2].x, O[2].y - 0.01); ctx.quadraticCurveTo(O[3].x, O[3].y, O[4].x, O[4].y); ctx.stroke();
       }
+      ctx.strokeStyle = 'rgba(30,36,50,0.45)'; ctx.lineWidth = 0.012; path(); ctx.stroke();
     };
-    wing(0.8, 0.05, -0.03, false);
+    wing(0.2, -0.14, -1);
 
     // Tail, then the body over it
     ctx.fillStyle = '#E9ECF1';
@@ -1821,6 +1810,7 @@ export class BikeGame {
     ctx.beginPath(); ctx.moveTo(-0.5, -0.06); ctx.quadraticCurveTo(-0.2, -0.17, 0.3, -0.155); ctx.quadraticCurveTo(0.5, -0.27, 0.68, -0.17); ctx.stroke();
     ctx.strokeStyle = 'rgba(255,190,120,0.45)'; ctx.lineWidth = 0.02;
     ctx.beginPath(); ctx.moveTo(-0.4, 0.08); ctx.quadraticCurveTo(0, 0.16, 0.4, 0.07); ctx.stroke();
+    ctx.strokeStyle = 'rgba(40,46,60,0.35)'; ctx.lineWidth = 0.012; bodyPath(); ctx.stroke();
     // Feet tucked up under the tail
     ctx.strokeStyle = '#E39A86'; ctx.lineWidth = 0.03;
     ctx.beginPath(); ctx.moveTo(-0.24, 0.12); ctx.lineTo(-0.42, 0.11); ctx.stroke();
@@ -1832,45 +1822,77 @@ export class BikeGame {
     ctx.fillStyle = '#0B0E14'; ctx.beginPath(); ctx.arc(0.6, -0.15, 0.03, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#FFFFFF'; ctx.beginPath(); ctx.arc(0.608, -0.158, 0.01, 0, Math.PI * 2); ctx.fill();
 
-    wing(1, 0, 0, true);
+    wing(0.14, -0.1, 1);
     ctx.lineJoin = 'miter'; ctx.lineCap = 'butt';
     ctx.restore();
   }
 
-  // A barn owl gliding past: a big round head with a pale heart-shaped face
-  // and dark eye, golden-buff back, a pale underside warmed by the stadium,
-  // a short tail, and broad rounded wings with fingered, barred tips — a
-  // couple of slow, deep beats, then a long glide. Crossing the moon it
-  // turns to a backlit silhouette with a bright moonlit rim.
+  // A barn owl gliding past on broad, rounded wings — a couple of slow, deep
+  // beats on the 3D rig, then a long glide. Golden-buff above, dusted grey
+  // with fine pale speckles and barred across the fingered primaries; snowy
+  // white beneath, warmed by the stadium. A big round head with the pale,
+  // heart-shaped face rimmed in tan and a dark eye, a short tail and long
+  // legs tucked up with the talons showing. Crossing the moon it turns to a
+  // backlit silhouette with a bright moonlit rim.
   drawOwl(x, y, size, phase) {
     const ctx = this.ctx;
-    const cyc = phase % (Math.PI * 5);
-    const glide = cyc >= Math.PI * 2;
-    const fa = glide ? 0.22 + Math.sin(cyc) * 0.04 : Math.sin(cyc), fh = glide ? 0.14 : Math.sin(cyc - 0.55);
+    const cyc = phase % (Math.PI * 5), glide = cyc >= Math.PI * 2;
+    const ta = glide ? 0.2 + Math.sin(cyc) * 0.03 : 0.3 + 0.8 * Math.sin(cyc);
+    const th = glide ? 0.16 : 0.3 + 0.8 * Math.sin(cyc - 0.55);
     const moon = this._moon;
     const md = moon ? Math.hypot(x - moon.x, y - moon.y) / (moon.R + size * 0.5) : 9;
     const back = md < 1 ? Math.min(1, (1 - md) * 3) : 0;
-
-    const wingPts = (k, ox, oy) => {
-      const wr = { x: -0.04 + ox, y: -0.12 + oy - 0.5 * fa * k };
-      return { wr, tip: { x: -0.4 + ox + 0.08 * Math.abs(fh), y: wr.y - 0.56 * fh * k }, te: { x: wr.x - 0.38, y: wr.y + 0.05 }, ox, oy };
+    const OUT = [[0, 0, 0], [0.07, 0.2, 0], [0.06, 0.4, 0.3], [-0.01, 0.62, 1], [-0.11, 0.78, 1], [-0.23, 0.86, 1],
+      [-0.33, 0.84, 1], [-0.4, 0.77, 1], [-0.45, 0.67, 1], [-0.47, 0.56, 0.8],
+      [-0.47, 0.42, 0.5], [-0.46, 0.28, 0.25], [-0.44, 0.14, 0], [-0.42, 0.02, 0]];
+    const BARS = [[-0.12, 0.62, 1], [-0.42, 0.66, 1], [-0.14, 0.7, 1], [-0.37, 0.76, 1], [-0.16, 0.77, 1], [-0.3, 0.82, 1]];
+    const wingOf = (sx, sy, zs) => {
+      const O = this.wingPoints(OUT, sx, sy, ta, th, zs, -0.15, 0.45);
+      const k = Math.max(0, Math.min(1, this.wingUnder(ta * 0.6 + th * 0.4, zs, 0.45) * 2.2 + 0.5));
+      const path = () => {
+        ctx.beginPath(); ctx.moveTo(O[0].x, O[0].y);
+        for (let i = 1; i <= 4; i++) ctx.quadraticCurveTo(O[i].x, O[i].y, (O[i].x + O[i + 1].x) / 2, (O[i].y + O[i + 1].y) / 2);
+        ctx.quadraticCurveTo(O[5].x, O[5].y, O[6].x, O[6].y);
+        for (let i = 7; i < O.length; i++) {
+          const a = O[i - 1], b = O[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, pull = i < 10 ? 0.16 : 0.06;
+          ctx.quadraticCurveTo(mx + (O[2].x - mx) * pull, my + (O[2].y - my) * pull, b.x, b.y);
+        }
+        ctx.closePath();
+      };
+      return { O, k, path, zs, bars: this.wingPoints(BARS, sx, sy, ta, th, zs, -0.15, 0.45) };
     };
-    const wingPath = ({ wr, tip, te, ox, oy }) => {
-      ctx.beginPath();
-      ctx.moveTo(0.2 + ox, -0.15 + oy);
-      ctx.quadraticCurveTo(0.15 + ox, (wr.y - 0.15 + oy) / 2 - 0.05, wr.x, wr.y);
-      ctx.quadraticCurveTo((wr.x + tip.x) / 2 + 0.02, (wr.y + tip.y) / 2 - 0.05, tip.x, tip.y);
-      // Fingered primaries: little scallops from the tip back along the trailing edge
-      for (let i = 1; i <= 4; i++) {
-        const t0 = (i - 1) / 4, t1 = i / 4;
-        const ax = tip.x + (te.x - tip.x) * t0, ay = tip.y + (te.y - tip.y) * t0;
-        const bx = tip.x + (te.x - tip.x) * t1, by = tip.y + (te.y - tip.y) * t1;
-        ctx.quadraticCurveTo((ax + bx) / 2 - 0.06, (ay + by) / 2 + 0.04, bx, by);
+    const far = wingOf(0.08, -0.16, -1), near = wingOf(0.02, -0.12, 1);
+    const paintWing = (w) => {
+      const { O, k, path, zs } = w, dim = zs > 0 ? 1 : 0.7;
+      const mixc = (a, b) => `rgb(${a.map((v, i) => Math.round((v + (b[i] - v) * k) * dim)).join(',')})`;
+      const g = ctx.createLinearGradient(O[2].x, O[2].y, O[10].x, O[10].y);
+      g.addColorStop(0, mixc([222, 176, 108], [250, 244, 232])); g.addColorStop(1, mixc([176, 132, 74], [234, 214, 186]));
+      path(); ctx.fillStyle = g; ctx.fill();
+      ctx.save(); path(); ctx.clip();
+      // Grey dusting over the top of the wing, with fine pale speckles
+      if (k < 0.5) {
+        ctx.fillStyle = 'rgba(150,146,150,0.35)';
+        ctx.beginPath(); ctx.moveTo(O[0].x, O[0].y); ctx.lineTo(O[2].x, O[2].y); ctx.lineTo(O[4].x, O[4].y); ctx.lineTo(O[9].x, O[9].y); ctx.lineTo(O[12].x, O[12].y); ctx.closePath(); ctx.fill();
+        if (zs > 0) {
+          const dots = [];
+          for (let i = 0; i < 9; i++) {
+            const a = O[1 + (i % 3)], b = O[10 + (i % 3)], t = 0.2 + Math.floor(i / 3) * 0.25;
+            dots.push(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+          }
+          [['rgba(70,46,24,0.55)', 0, 0.016], ['rgba(255,250,240,0.9)', -0.004, 0.009]].forEach(([c, o, r]) => {
+            ctx.fillStyle = c; ctx.beginPath();
+            for (let i = 0; i < dots.length; i += 2) { ctx.moveTo(dots[i] + o + r, dots[i + 1] + o); ctx.arc(dots[i] + o, dots[i + 1] + o, r, 0, Math.PI * 2); }
+            ctx.fill();
+          });
+        }
       }
-      ctx.quadraticCurveTo(-0.32 + ox, (te.y + oy) / 2, -0.36 + ox, 0.02 + oy);
-      ctx.closePath();
+      ctx.strokeStyle = k < 0.5 ? 'rgba(110,76,40,0.6)' : 'rgba(170,140,100,0.35)'; ctx.lineWidth = 0.03; ctx.beginPath();
+      for (let i = 0; i < w.bars.length; i += 2) { ctx.moveTo(w.bars[i].x, w.bars[i].y); ctx.lineTo(w.bars[i + 1].x, w.bars[i + 1].y); }
+      ctx.stroke();
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(80,56,30,0.4)'; ctx.lineWidth = 0.012; path(); ctx.stroke();
     };
-    const head = () => { ctx.beginPath(); ctx.arc(0.36, -0.16, 0.21, 0, Math.PI * 2); };
+    const head = () => { ctx.beginPath(); ctx.arc(0.36, -0.15, 0.2, 0, Math.PI * 2); };
     const body = () => {
       ctx.beginPath();
       ctx.moveTo(-0.46, 0.0);
@@ -1880,84 +1902,81 @@ export class BikeGame {
       ctx.closePath();
       ctx.moveTo(-0.4, -0.04); ctx.quadraticCurveTo(-0.62, -0.08, -0.64, 0.02); ctx.quadraticCurveTo(-0.6, 0.08, -0.4, 0.06); ctx.closePath();
     };
-    const far = wingPts(0.82, 0.06, -0.04), near = wingPts(1, 0, 0);
 
     ctx.save(); ctx.translate(x, y); ctx.scale(size, size);
-    // Full colour
-    wingPath(far); ctx.fillStyle = '#8C6A40'; ctx.fill();
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    paintWing(far);
     const belly = ctx.createLinearGradient(0, -0.22, 0, 0.2);
-    belly.addColorStop(0, '#C59A5E'); belly.addColorStop(0.5, '#E4D2B2'); belly.addColorStop(1, '#F6E6C8');
+    belly.addColorStop(0, '#C59A5E'); belly.addColorStop(0.5, '#EADCC2'); belly.addColorStop(1, '#F8ECD6');
     body(); ctx.fillStyle = belly; ctx.fill();
-    const hg = ctx.createRadialGradient(0.3, -0.26, 0.02, 0.36, -0.16, 0.24);
-    hg.addColorStop(0, '#DDB47A'); hg.addColorStop(1, '#A9804A');
-    head(); ctx.fillStyle = hg; ctx.fill();
-    ctx.fillStyle = '#F6F0E4';
-    ctx.beginPath(); ctx.ellipse(0.45, -0.13, 0.11, 0.17, 0.12, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#B07E44'; ctx.lineWidth = 0.025; ctx.stroke();
-    ctx.fillStyle = '#120C08'; ctx.beginPath(); ctx.arc(0.5, -0.16, 0.034, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.8)'; ctx.beginPath(); ctx.arc(0.508, -0.17, 0.01, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#D8CBB0';
-    ctx.beginPath(); ctx.moveTo(0.55, -0.12); ctx.quadraticCurveTo(0.6, -0.1, 0.56, -0.06); ctx.closePath(); ctx.fill();
-    // Talons tucked up under the body
-    ctx.strokeStyle = '#3A2A1A'; ctx.lineWidth = 0.022; ctx.lineCap = 'round';
+    ctx.fillStyle = 'rgba(120,90,60,0.5)';
+    [[-0.1, 0.06], [0.02, 0.1], [0.12, 0.06], [-0.04, 0.13], [0.08, 0.13]].forEach(([px, py]) => { ctx.beginPath(); ctx.arc(px, py, 0.012, 0, Math.PI * 2); ctx.fill(); });
+    // Long legs tucked up, the talons showing under the tail
+    ctx.strokeStyle = '#E8DCC4'; ctx.lineWidth = 0.05;
+    ctx.beginPath(); ctx.moveTo(0.02, 0.14); ctx.quadraticCurveTo(-0.1, 0.2, -0.22, 0.17); ctx.stroke();
+    ctx.strokeStyle = '#3A2A1A'; ctx.lineWidth = 0.02;
     ctx.beginPath();
-    [0, 0.05].forEach((o) => { ctx.moveTo(-0.08 + o, 0.17); ctx.quadraticCurveTo(-0.14 + o, 0.22, -0.19 + o, 0.19); });
-    ctx.stroke(); ctx.lineCap = 'butt';
-    const wg = ctx.createLinearGradient(near.wr.x + 0.1, 0, near.te.x, 0);
-    wg.addColorStop(0, '#D8B276'); wg.addColorStop(1, '#F1E6D0');
-    wingPath(near); ctx.fillStyle = wg; ctx.fill();
-    ctx.save(); wingPath(near); ctx.clip();
-    ctx.strokeStyle = 'rgba(120,86,44,0.55)'; ctx.lineWidth = 0.03;
-    for (let i = 1; i <= 3; i++) {
-      const t = 0.2 + i * 0.16;
-      const px = near.tip.x + (near.wr.x - near.tip.x) * t, py = near.tip.y + (near.wr.y - near.tip.y) * t;
-      ctx.beginPath(); ctx.moveTo(px + 0.06, py - 0.02); ctx.lineTo(px - 0.3, py + 0.05); ctx.stroke();
-    }
-    // Darker fingertips and fine pale speckles over the coverts
-    ctx.fillStyle = 'rgba(110,76,40,0.45)';
-    ctx.beginPath(); ctx.arc(near.tip.x - 0.04, near.tip.y + 0.04, 0.13, 0, Math.PI * 2); ctx.fill();
-    for (let i = 0; i < 7; i++) {
-      const t = 0.15 + (i % 4) * 0.2, side = Math.floor(i / 4) * 0.08;
-      const px = near.wr.x + (near.tip.x - near.wr.x) * t * 0.6 - 0.06 - side, py = near.wr.y + (near.tip.y - near.wr.y) * t * 0.6 + 0.04 + side * 0.4;
-      ctx.fillStyle = 'rgba(70,46,24,0.55)'; ctx.beginPath(); ctx.arc(px, py, 0.016, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = 'rgba(255,250,240,0.9)'; ctx.beginPath(); ctx.arc(px - 0.004, py - 0.004, 0.009, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.restore();
+    [0, 0.04].forEach((o) => { ctx.moveTo(-0.22 + o, 0.17); ctx.quadraticCurveTo(-0.28 + o, 0.22, -0.31 + o, 0.18); });
+    ctx.stroke();
+    const hg = ctx.createRadialGradient(0.3, -0.26, 0.02, 0.36, -0.15, 0.23);
+    hg.addColorStop(0, '#E2BC84'); hg.addColorStop(1, '#A9804A');
+    head(); ctx.fillStyle = hg; ctx.fill();
+    ctx.fillStyle = 'rgba(150,146,150,0.35)'; ctx.beginPath(); ctx.arc(0.3, -0.24, 0.12, Math.PI, Math.PI * 1.9); ctx.fill();
+    // It turns its head to look at us: the pale heart-shaped face rimmed in
+    // tan, a ridge down the middle to the bill, and two dark eyes
+    ctx.beginPath(); ctx.moveTo(0.4, -0.26);
+    ctx.bezierCurveTo(0.37, -0.33, 0.27, -0.33, 0.255, -0.24); ctx.bezierCurveTo(0.24, -0.12, 0.33, -0.02, 0.4, 0.03);
+    ctx.bezierCurveTo(0.47, -0.02, 0.56, -0.12, 0.545, -0.24); ctx.bezierCurveTo(0.53, -0.33, 0.43, -0.33, 0.4, -0.26); ctx.closePath();
+    const fg = ctx.createRadialGradient(0.4, -0.15, 0.02, 0.4, -0.15, 0.17); fg.addColorStop(0, '#FFFFFF'); fg.addColorStop(1, '#EADCC6');
+    ctx.fillStyle = fg; ctx.fill(); ctx.strokeStyle = '#A8743C'; ctx.lineWidth = 0.024; ctx.stroke();
+    ctx.strokeStyle = 'rgba(190,150,110,0.6)'; ctx.lineWidth = 0.014; ctx.beginPath(); ctx.moveTo(0.4, -0.25); ctx.lineTo(0.4, -0.12); ctx.stroke();
+    ctx.fillStyle = '#120C08';
+    [0.345, 0.455].forEach((ex) => { ctx.beginPath(); ctx.ellipse(ex, -0.165, 0.026, 0.032, 0, 0, Math.PI * 2); ctx.fill(); });
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    [0.352, 0.462].forEach((ex) => { ctx.beginPath(); ctx.arc(ex, -0.176, 0.008, 0, Math.PI * 2); ctx.fill(); });
+    ctx.fillStyle = '#D8C6A4'; ctx.beginPath(); ctx.moveTo(0.385, -0.12); ctx.lineTo(0.415, -0.12); ctx.quadraticCurveTo(0.41, -0.07, 0.4, -0.06); ctx.quadraticCurveTo(0.39, -0.07, 0.385, -0.12); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(232,240,255,0.55)'; ctx.lineWidth = 0.016; ctx.beginPath(); ctx.arc(0.36, -0.15, 0.2, Math.PI * 1.05, Math.PI * 1.6); ctx.stroke();
+    paintWing(near);
     // Backlit by the moon: a dark silhouette with a thin bright rim
     if (back > 0) {
       ctx.globalAlpha = back * 0.88;
       ctx.fillStyle = '#0B1120';
-      wingPath(far); ctx.fill(); body(); ctx.fill(); head(); ctx.fill(); wingPath(near); ctx.fill();
+      far.path(); ctx.fill(); body(); ctx.fill(); head(); ctx.fill(); near.path(); ctx.fill();
       ctx.globalAlpha = back;
       ctx.strokeStyle = 'rgba(232,240,255,0.75)'; ctx.lineWidth = 0.03;
-      head(); ctx.stroke(); wingPath(near); ctx.stroke();
+      head(); ctx.stroke(); near.path(); ctx.stroke();
       ctx.globalAlpha = 1;
     }
+    ctx.lineJoin = 'miter'; ctx.lineCap = 'butt';
     ctx.restore();
   }
 
-  // A red dragon, drawn facing right (`facing` -1 mirrors it), about 85
-  // units from spade to snout. A horned head with a glowing slit eye sits on
-  // an S-curved neck that can dip toward a target (`pose.tilt`), with a jaw
-  // that drops open (`pose.jaw`) on a fanged, dark mouth. A scaled crimson
-  // body with gold belly plates, spines running crown to tail, clawed legs
-  // tucked up, and a long whip of a tail ending in a spade. Bat wings: arm
-  // and finger bones fanning under a membrane that runs from deep crimson
-  // at the bones to backlit ember-orange at the scalloped trailing edge,
-  // veined and creased along each finger, beating slow and deep with the
-  // hand lagging the arm; the far wing sits in shadow. Moonlight rims its
-  // back, and when it's about to breathe fire (`pose.glow`) its throat and
-  // chest glow from inside.
+  // A red dragon, drawn facing right (`facing` -1 mirrors it), about 100
+  // units from spade to snout. Its bat wings beat on a simple 3D rig: each
+  // swings about the body's long axis and is seen from a little above, so
+  // the near wing sweeps down in front of the belly and rises to show its
+  // floodlit underside while the far wing peeks over the back; the hand lags
+  // the arm and half folds on the upstroke. A horned head with a frill, a
+  // heavy brow and a glowing slit eye sits on an S-curved neck that can dip
+  // toward a target (`pose.tilt`); the jaw drops open (`pose.jaw`) on a
+  // fanged mouth. A muscled crimson body over gold belly plates, a webbed
+  // crest of spines down the back, legs tucked up with talons trailing, and
+  // a long whip of a tail ending in a spade. The moon rims its back in cool
+  // light, the floodlights warm its belly, and when it's about to breathe
+  // fire (`pose.glow`) its throat and chest glow from inside.
   drawDragon(x, y, scale, phase, ts, facing = 1, pose = {}) {
     const ctx = this.ctx, { fire } = this.fireSprites();
+    // Scales and veins only where they'd show — not on a small, distant dragon
+    const fine = !this.lowPower && scale * this.dpr >= 2.6;
     const tilt = pose.tilt || 0, jaw = pose.jaw || 0, inner = pose.glow || 0;
-    const f = Math.sin(phase), fl = Math.sin(phase - 0.7);
-    const BONE = '#EEDFC6', BONE_D = '#7C6654', INK = 'rgba(30,2,6,0.7)', GOLD0 = '#F6BD62', GOLD1 = '#C0602A';
+    const f = Math.sin(phase);
+    const BONE = '#F2E4CA', BONE_D = '#6E5A48', INK = 'rgba(22,0,6,0.8)', GOLD0 = '#FAC86C', GOLD1 = '#B4511E';
+    const RIM = 'rgba(196,216,255,0.62)', UNDER = 'rgba(255,150,70,0.45)';
     ctx.save(); ctx.translate(x, y + f * 2.4); ctx.scale(scale * facing, scale);
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    const skin = (y0, y1) => {
+    const skin = (y0, y1, dark) => {
       const g = ctx.createLinearGradient(0, y0, 0, y1);
-      g.addColorStop(0, '#4A080C'); g.addColorStop(0.5, '#9E1B20'); g.addColorStop(1, '#C9452A');
+      g.addColorStop(0, dark ? '#22030A' : '#3C0610'); g.addColorStop(0.45, dark ? '#560B14' : '#961820'); g.addColorStop(1, dark ? '#741B1B' : '#D24C2C');
       return g;
     };
     // A spine at (px, py) pointing along (ax, ay), added to the current path
@@ -1970,6 +1989,16 @@ export class BikeGame {
       g.addColorStop(0, BONE); g.addColorStop(1, BONE_D);
       ctx.fillStyle = g; ctx.fill();
       ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+    };
+    // Hooked claws, each [x, y, angle, length], curling toward +90° of their
+    // own direction
+    const claws = (list, color) => {
+      ctx.beginPath();
+      list.forEach(([cx, cy, a, L]) => {
+        const c = Math.cos(a), s = Math.sin(a), T = (px, py) => [cx + px * c - py * s, cy + px * s + py * c];
+        ctx.moveTo(...T(0, -0.5)); ctx.quadraticCurveTo(...T(L * 0.78, -0.6), ...T(L, L * 0.4)); ctx.quadraticCurveTo(...T(L * 0.5, 0.15), ...T(0, 0.5)); ctx.closePath();
+      });
+      ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.25; ctx.stroke();
     };
     // A spine on an edge point of a tube: out from the edge, leaning back
     const edgeSpike = (q, len, w) => spike(q.x, q.y, q.nx * 0.6 + q.ny * 0.8, q.ny * 0.6 - q.nx * 0.8, len, w);
@@ -1989,48 +2018,65 @@ export class BikeGame {
       for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i].x, bot[i].y);
       ctx.closePath();
     };
+    const stroke = (pts, color, w) => {
+      ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    };
+    const limb = (pts, dark) => {
+      const t = tube(pts); outline(t.top, t.bot);
+      ctx.fillStyle = skin(pts[0].y - 3, pts[pts.length - 1].y + 2, dark); ctx.fill();
+      ctx.strokeStyle = INK; ctx.lineWidth = 0.35; ctx.stroke();
+    };
 
-    const wing = (sx, sy, k, near) => {
-      // On the downstroke the wing turns toward us edge-on, so its fingers
-      // close up (foreshortened); at the top of the beat they fan wide open
-      const sp = 0.62 + 0.38 * (0.5 + 0.5 * f);
-      const E = { x: sx - 3, y: sy - 12 * f * k - 2 };
-      const Wr = { x: sx + 7, y: sy - 25 * f * k - 4 };
-      const tips = [
-        { x: Wr.x + 15 * sp, y: Wr.y - 12 * fl * k - 1 },
-        { x: Wr.x + 1 * sp, y: Wr.y - 19 * fl * k - 7 },
-        { x: Wr.x - 15 * sp, y: Wr.y - 15 * fl * k - 5 },
-        { x: Wr.x - 28 * sp, y: Wr.y - 8 * fl * k },
-        { x: Wr.x - 37 * sp, y: Wr.y - 2 * fl * k + 6 },
-      ];
-      const root = { x: sx - 21, y: sy + 5 };
-      // The deeply scalloped trailing edge, finger tip to finger tip and back
-      // to the body: each span of membrane sags in toward the wrist
+    // Wingbeat: the flap angle about the body's axis (~70° up at the top,
+    // ~30° down at the bottom), the forearm and hand trailing the arm, the
+    // hand opening wide on the downstroke, the whole wing sweeping forward
+    // as it comes down
+    const flap = (p) => 0.36 + 0.86 * Math.sin(p);
+    const ta = flap(phase), tm = flap(phase - 0.3), th = flap(phase - 0.62);
+    const ext = 0.84 - 0.16 * Math.cos(phase - 0.4), sweep = -Math.cos(phase) * 2.6;
+    const wing = (sx, sy, near) => {
+      const zs = near ? 1 : -1, KX = -0.12, KY = 0.3;
+      // A point `v` out along the span and `u` along the body, swung up by
+      // `t`; then onto the screen, seen from slightly above and behind
+      const P = (u, v, t) => ({ u: u + (sweep * v) / 50, y: v * Math.sin(t), z: v * Math.cos(t) * zs });
+      const add = (a, b) => ({ u: a.u + b.u, y: a.y + b.y, z: a.z + b.z });
+      const scr = (q) => ({ x: sx + q.u + q.z * KX, y: sy - q.y + q.z * KY });
+      const e3 = P(-5, 15, ta), w3 = add(e3, P(8, 14, tm));
+      const E = scr(e3), Wr = scr(w3);
+      const tips = [[-8, 33], [-24, 27], [-37, 15], [-41, -2]].map(([du, dv]) => scr(add(w3, P(du * ext - (1 - ext) * 8, dv * ext, th))));
+      const root = near ? { x: -15, y: 0.8 } : { x: -12, y: -4.4 };
+      // Each span of membrane sags in toward the wrist between the fingers
+      const sag = (a, b, c, k2) => { const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2; ctx.quadraticCurveTo(mx + (c.x - mx) * k2, my + (c.y - my) * k2, b.x, b.y); };
       const trailing = () => {
-        for (let i = 1; i < tips.length; i++) {
-          const a = tips[i - 1], b = tips[i], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-          ctx.quadraticCurveTo(mx + (Wr.x - mx) * 0.46, my + (Wr.y - my) * 0.46, b.x, b.y);
-        }
-        const last = tips[tips.length - 1];
-        ctx.quadraticCurveTo((last.x + root.x) / 2 + 4, (last.y + root.y) / 2 - 3, root.x, root.y);
+        for (let i = 1; i < tips.length; i++) sag(tips[i - 1], tips[i], Wr, 0.42);
+        sag(tips[tips.length - 1], root, E, 0.3);
       };
       const edge = () => {
         ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.lineTo(tips[0].x, tips[0].y);
         trailing(); ctx.closePath();
       };
-      const mg = ctx.createRadialGradient(Wr.x, Wr.y, 1, Wr.x, Wr.y, 40);
-      if (near) { mg.addColorStop(0, 'rgba(88,6,16,0.98)'); mg.addColorStop(0.42, 'rgba(150,22,30,0.95)'); mg.addColorStop(0.78, 'rgba(206,56,38,0.92)'); mg.addColorStop(1, 'rgba(255,128,62,0.9)'); }
-      else { mg.addColorStop(0, 'rgba(50,4,10,0.98)'); mg.addColorStop(1, 'rgba(118,22,24,0.94)'); }
+      // Which side faces us: the near wing shows its underside once it's
+      // raised, the far wing its top unless it's well down. The underside
+      // is lit warm by the floodlights below, the top is dark and moonlit.
+      const under = near ? Math.sin(tm) - 0.3 * Math.cos(tm) : -(Math.sin(tm) + 0.3 * Math.cos(tm));
+      const k = Math.max(0, Math.min(1, under * 1.6 + 0.5)), dim = near ? 1 : 0.56;
+      const col = (a, b) => `rgb(${a.map((v, i) => Math.round((v + (b[i] - v) * k) * dim)).join(',')})`;
+      const mg = ctx.createRadialGradient(Wr.x, Wr.y, 1, Wr.x, Wr.y, 46);
+      mg.addColorStop(0, col([48, 5, 12], [92, 8, 18]));
+      mg.addColorStop(0.42, col([98, 14, 22], [172, 30, 28]));
+      mg.addColorStop(1, col([144, 34, 30], [255, 122, 56]));
       edge(); ctx.fillStyle = mg; ctx.fill();
       ctx.save(); edge(); ctx.clip();
-      // Creases in the shade of each finger and the arm
-      ctx.strokeStyle = near ? 'rgba(46,0,8,0.38)' : 'rgba(20,0,4,0.4)'; ctx.lineWidth = 2.8; ctx.beginPath();
-      tips.forEach((t) => { ctx.moveTo(Wr.x + 0.8, Wr.y + 1.1); ctx.lineTo(t.x + 0.9, t.y + 1.5); });
-      ctx.moveTo(sx + 0.8, sy + 1.3); ctx.lineTo(E.x + 0.8, E.y + 1.5); ctx.lineTo(Wr.x + 0.8, Wr.y + 1.5);
+      // Creases in the shade of each finger and along the arm
+      ctx.strokeStyle = `rgba(30,0,6,${near ? 0.36 : 0.42})`; ctx.lineWidth = 3; ctx.beginPath();
+      tips.forEach((t) => { ctx.moveTo(Wr.x + 0.9, Wr.y + 1.2); ctx.lineTo(t.x + 1, t.y + 1.6); });
+      ctx.moveTo(sx + 0.8, sy + 1.4); ctx.lineTo(E.x + 0.8, E.y + 1.6); ctx.lineTo(Wr.x + 0.8, Wr.y + 1.6);
       ctx.stroke();
       // Veins branching out between the fingers
-      ctx.strokeStyle = near ? 'rgba(70,4,14,0.42)' : 'rgba(26,0,6,0.38)'; ctx.lineWidth = 0.35; ctx.beginPath();
-      for (let i = 1; i < tips.length; i++) {
+      ctx.strokeStyle = near ? 'rgba(70,4,14,0.45)' : 'rgba(26,0,6,0.4)'; ctx.lineWidth = 0.35; ctx.beginPath();
+      for (let i = 1; i < (fine ? tips.length : 0); i++) {
         const a = tips[i - 1], b = tips[i];
         for (let v = 1; v <= 2; v++) {
           const t = v / 3, ex = a.x + (b.x - a.x) * t, ey = a.y + (b.y - a.y) * t;
@@ -2039,227 +2085,301 @@ export class BikeGame {
         }
       }
       ctx.stroke();
-      // Light shining through the thin membrane along the trailing edge
+      // Light through the thin skin at the trailing edge, and the moon's
+      // sheen along the top of the arm
       ctx.globalCompositeOperation = 'lighter';
       ctx.beginPath(); ctx.moveTo(tips[0].x, tips[0].y); trailing();
-      ctx.strokeStyle = near ? 'rgba(255,110,40,0.4)' : 'rgba(200,60,30,0.25)'; ctx.lineWidth = 6; ctx.stroke();
-      ctx.strokeStyle = near ? 'rgba(255,180,96,0.38)' : 'rgba(230,100,50,0.2)'; ctx.lineWidth = 2.2; ctx.stroke();
+      ctx.strokeStyle = `rgba(255,110,40,${(0.12 + 0.36 * k) * dim})`; ctx.lineWidth = 7; ctx.stroke();
+      ctx.strokeStyle = `rgba(255,190,110,${(0.08 + 0.34 * k) * dim})`; ctx.lineWidth = 2.4; ctx.stroke();
+      if (k < 1) {
+        ctx.strokeStyle = `rgba(140,160,230,${0.24 * (1 - k) * dim})`; ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.lineTo(tips[0].x, tips[0].y); ctx.stroke();
+      }
       ctx.restore();
-      ctx.strokeStyle = INK; ctx.lineWidth = 0.45; edge(); ctx.stroke();
-      // Bones: a thick arm, then tapering fingers, lit along the top
-      ctx.strokeStyle = near ? '#3C060A' : '#22030A';
-      ctx.lineWidth = 2.8; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.stroke();
+      ctx.strokeStyle = INK; ctx.lineWidth = 0.5; edge(); ctx.stroke();
+      // Bones: a thick arm, then tapering fingers bowed against the membrane
+      ctx.strokeStyle = near ? '#40060C' : '#22030A';
+      ctx.lineWidth = 3.2; ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(E.x, E.y); ctx.stroke();
+      ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(E.x, E.y); ctx.lineTo(Wr.x, Wr.y); ctx.stroke();
       tips.forEach((t, i) => {
-        ctx.lineWidth = 1.5 - i * 0.18; ctx.beginPath(); ctx.moveTo(Wr.x, Wr.y);
-        ctx.quadraticCurveTo((Wr.x + t.x) / 2 + (t.y - Wr.y) * 0.06, (Wr.y + t.y) / 2 - (t.x - Wr.x) * 0.06, t.x, t.y); ctx.stroke();
+        ctx.lineWidth = 1.7 - i * 0.24; ctx.beginPath(); ctx.moveTo(Wr.x, Wr.y);
+        ctx.quadraticCurveTo((Wr.x + t.x) / 2 + (t.y - Wr.y) * 0.07, (Wr.y + t.y) / 2 - (t.x - Wr.x) * 0.07, t.x, t.y); ctx.stroke();
       });
       if (near) {
-        ctx.strokeStyle = 'rgba(255,176,156,0.5)'; ctx.lineWidth = 0.5;
-        ctx.beginPath(); ctx.moveTo(sx, sy - 0.9); ctx.lineTo(E.x, E.y - 0.9); ctx.lineTo(Wr.x, Wr.y - 0.9); ctx.lineTo(tips[0].x, tips[0].y - 0.4); ctx.stroke();
+        ctx.strokeStyle = `rgba(255,196,176,${0.3 + 0.3 * (1 - k)})`; ctx.lineWidth = 0.6;
+        ctx.beginPath(); ctx.moveTo(sx, sy - 1.2); ctx.lineTo(E.x, E.y - 1.1); ctx.lineTo(Wr.x, Wr.y - 0.9); ctx.lineTo(tips[0].x, tips[0].y - 0.4); ctx.stroke();
       }
-      ctx.fillStyle = near ? '#5A0A10' : '#2C040A';
-      ctx.beginPath(); ctx.arc(Wr.x, Wr.y, 1.5, 0, Math.PI * 2); ctx.arc(E.x, E.y, 1.3, 0, Math.PI * 2); ctx.fill();
-      // Claws: a hooked thumb at the wrist and a hook at each finger tip
-      ctx.fillStyle = near ? BONE : BONE_D; ctx.beginPath();
-      ctx.moveTo(Wr.x - 0.6, Wr.y - 0.7); ctx.quadraticCurveTo(Wr.x + 2.8, Wr.y - 2.4, Wr.x + 3.6, Wr.y - 0.3); ctx.lineTo(Wr.x + 0.6, Wr.y + 0.9); ctx.closePath();
-      tips.forEach((t, i) => {
-        const d = i === 0 ? 1 : -1;
-        ctx.moveTo(t.x, t.y - 0.55); ctx.quadraticCurveTo(t.x + d * 1.7, t.y - 1.3, t.x + d * 1.9, t.y + 0.7); ctx.lineTo(t.x, t.y + 0.55); ctx.closePath();
-      });
-      ctx.fill();
+      ctx.fillStyle = near ? '#5E0B12' : '#2C040A';
+      ctx.beginPath(); ctx.arc(Wr.x, Wr.y, 1.8, 0, Math.PI * 2); ctx.moveTo(E.x + 1.5, E.y); ctx.arc(E.x, E.y, 1.5, 0, Math.PI * 2); ctx.fill();
+      // A hooked thumb at the wrist and a small hook at each fingertip
+      const fa = Math.atan2(Wr.y - E.y, Wr.x - E.x);
+      claws([[Wr.x, Wr.y, fa - 0.5, 4.2], ...tips.map((t) => [t.x, t.y, Math.atan2(t.y - Wr.y, t.x - Wr.x), 2])], near ? BONE : BONE_D);
     };
 
-    wing(6, -5.6, 0.85, false);
+    wing(7, -7.4, false);
+
+    // The far legs, in shadow behind the body
+    limb([{ x: -6.4, y: 3.4, w: 2 }, { x: -10.6, y: 7.4, w: 1.4 }, { x: -14, y: 8.4, w: 0.9 }], true);
+    limb([{ x: 9.6, y: 2.6, w: 1.7 }, { x: 8.6, y: 6.6, w: 1.2 }, { x: 11.6, y: 8, w: 0.8 }], true);
+    claws([[-14, 8.4, 2.7, 2.2], [-13.6, 8.9, 2.3, 2], [11.6, 8, 0.5, 1.9], [11.8, 7.5, 0.1, 1.8]], BONE_D);
 
     // Tail: tapering from the hips into a whip that sways through each beat,
     // spined along the top and plated underneath, ending in a spade
     const tail = [];
-    for (let i = 0; i <= 18; i++) {
-      const t = i / 18;
-      tail.push({ x: -11 - t * 34, y: 1.2 + t * 4 + Math.sin(t * 3.4 + phase * 0.55) * 3.4 * t, w: 4.1 * Math.pow(1 - t, 0.95) + 0.4 });
+    for (let i = 0; i <= 20; i++) {
+      const t = i / 20;
+      tail.push({ x: -12 - t * 41, y: 1.6 + t * 5.5 + Math.sin(t * 3.3 + phase * 0.55 - 0.4) * 4.2 * t, w: 4.9 * Math.pow(1 - t, 0.9) + 0.35 });
     }
     const tt = tube(tail);
-    outline(tt.top, tt.bot); ctx.fillStyle = skin(-3, 9); ctx.fill();
-    ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
-    for (let i = 0; i < 15; i++) {
-      const b = tt.bot[i], p = tail[i];
-      ctx.strokeStyle = GOLD1; ctx.lineWidth = p.w * 0.55;
-      ctx.beginPath(); ctx.moveTo(b.x + (p.x - b.x) * 0.32, b.y + (p.y - b.y) * 0.32);
-      ctx.lineTo(tt.bot[i + 1].x + (tail[i + 1].x - tt.bot[i + 1].x) * 0.32, tt.bot[i + 1].y + (tail[i + 1].y - tt.bot[i + 1].y) * 0.32); ctx.stroke();
-    }
+    outline(tt.top, tt.bot); ctx.fillStyle = skin(-3, 10); ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 0.45; ctx.stroke();
+    this.dragonPlates(tt.bot.slice(0, 18), tail, '#C8692C', 'rgba(90,30,8,0.6)');
+    stroke(tt.top.slice(0, 16), RIM, 0.55);
     spikes(() => {
-      for (let j = 1; j < 16; j += 2) { const len = 2.3 * (1 - j / 18) + 0.5; edgeSpike(tt.top[j], len, len * 0.42); }
+      for (let j = 1; j < 18; j += 2) { const len = 2.8 * (1 - j / 20) + 0.6; edgeSpike(tt.top[j], len, len * 0.42); }
     });
-    const tp = tail[18], tq = tail[16], ta = Math.atan2(tp.y - tq.y, tp.x - tq.x);
-    ctx.save(); ctx.translate(tp.x, tp.y); ctx.rotate(ta); ctx.scale(1.35, 1.35);
-    ctx.beginPath(); ctx.moveTo(-0.6, 0); ctx.quadraticCurveTo(1.2, -3.6, 2.4, -3.8); ctx.lineTo(6.6, 0); ctx.lineTo(2.4, 3.8); ctx.quadraticCurveTo(1.2, 3.6, -0.6, 0); ctx.closePath();
-    ctx.fillStyle = '#6C0E13'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,190,150,0.35)'; ctx.lineWidth = 0.35; ctx.beginPath(); ctx.moveTo(0.4, 0); ctx.lineTo(5.6, 0); ctx.stroke();
+    const tp = tail[20], tq = tail[18], tA = Math.atan2(tp.y - tq.y, tp.x - tq.x);
+    ctx.save(); ctx.translate(tp.x, tp.y); ctx.rotate(tA); ctx.scale(1.3, 1.3);
+    ctx.beginPath(); ctx.moveTo(-0.6, 0);
+    ctx.quadraticCurveTo(0.8, -4.4, 3.4, -4.8); ctx.quadraticCurveTo(4.8, -2.4, 8.4, 0);
+    ctx.quadraticCurveTo(4.8, 2.4, 3.4, 4.8); ctx.quadraticCurveTo(0.8, 4.4, -0.6, 0); ctx.closePath();
+    const sg = ctx.createLinearGradient(0, -4.8, 0, 4.8);
+    sg.addColorStop(0, '#9A1A20'); sg.addColorStop(0.5, '#5A0A10'); sg.addColorStop(1, '#C0482C');
+    ctx.fillStyle = sg; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,200,160,0.4)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    ctx.moveTo(0.2, 0); ctx.lineTo(7.4, 0); ctx.moveTo(1, -0.4); ctx.lineTo(3.2, -4.2); ctx.moveTo(1, 0.4); ctx.lineTo(3.2, 4.2); ctx.stroke();
     ctx.restore();
 
-    // Body: scaled crimson over gold belly plates
+    // Body: a deep chest and shoulders tapering to the hips, scaled crimson
+    // over gold belly plates
     const torso = () => {
-      ctx.beginPath(); ctx.moveTo(-12.5, -1.6);
-      ctx.bezierCurveTo(-6, -6.4, 2, -7.8, 7.8, -6.2); ctx.bezierCurveTo(11.6, -5, 13.6, -2, 13.2, 1.4);
-      ctx.bezierCurveTo(12.4, 5.6, 6, 7.8, 0, 7); ctx.bezierCurveTo(-5, 6.4, -10.5, 5, -13.4, 2.4); ctx.closePath();
+      ctx.beginPath(); ctx.moveTo(-15, -1.2);
+      ctx.bezierCurveTo(-10, -6.4, -2, -7.6, 4, -8.2);
+      ctx.bezierCurveTo(8.4, -8.6, 11.6, -7.2, 13.2, -4.2);
+      ctx.bezierCurveTo(15.8, -0.2, 14.8, 5, 10.2, 7.6);
+      ctx.bezierCurveTo(5, 9.8, -2, 8.8, -7, 7.2);
+      ctx.bezierCurveTo(-11, 6, -15, 4.6, -16.6, 1.6);
+      ctx.closePath();
     };
-    torso(); ctx.fillStyle = skin(-6.5, 6.5); ctx.fill();
+    torso(); ctx.fillStyle = skin(-8, 8); ctx.fill();
     ctx.save(); torso(); ctx.clip();
-    const plates = ctx.createLinearGradient(0, 1, 0, 7);
+    const plates = ctx.createLinearGradient(0, 1, 0, 9);
     plates.addColorStop(0, GOLD0); plates.addColorStop(1, GOLD1);
     ctx.fillStyle = plates;
-    ctx.beginPath(); ctx.moveTo(-14, 3.4); ctx.quadraticCurveTo(0, 2.2, 13.2, -1); ctx.lineTo(13.2, 8); ctx.lineTo(-14, 8); ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = 'rgba(90,30,10,0.55)'; ctx.lineWidth = 0.35; ctx.beginPath();
-    for (let px = -12; px <= 11; px += 2.2) { const py = 3.2 - (px + 14) * 0.15; ctx.moveTo(px, py); ctx.quadraticCurveTo(px + 1, py + 1.8, px + 0.4, py + 4.4); }
-    ctx.stroke();
-    ctx.strokeStyle = 'rgba(26,0,4,0.32)'; ctx.lineWidth = 0.35; ctx.beginPath();
-    for (let row = 0; row < 4; row++) {
-      const ry = -4.8 + row * 1.9;
-      for (let px = -13 + (row % 2) * 1.1; px < 12; px += 2.2) { ctx.moveTo(px - 1, ry); ctx.arc(px, ry, 1, Math.PI, 0, true); }
+    ctx.beginPath(); ctx.moveTo(-17, 3.4); ctx.quadraticCurveTo(0, 3.6, 15.5, -0.8); ctx.lineTo(16, 10); ctx.lineTo(-17, 10); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(96,30,8,0.6)'; ctx.lineWidth = 0.4; ctx.beginPath();
+    for (let px = -15; px <= 13; px += 2.3) {
+      const py = 3.5 - Math.max(0, px) * 0.24 - (px < 0 ? -px * 0.005 : 0);
+      ctx.moveTo(px, py); ctx.quadraticCurveTo(px + 1.1, py + 2.4, px + 0.5, py + 6);
     }
     ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,236,190,0.5)'; ctx.lineWidth = 0.3; ctx.beginPath();
+    for (let px = -14.4; px <= 13; px += 2.3) {
+      const py = 3.6 - Math.max(0, px) * 0.24;
+      ctx.moveTo(px, py + 0.3); ctx.quadraticCurveTo(px + 1, py + 2.4, px + 0.5, py + 5.6);
+    }
+    ctx.stroke();
+    // Overlapping scales, a sheen on the top rows, and the bulge of the
+    // shoulder and haunch muscles
+    ctx.strokeStyle = 'rgba(24,0,4,0.34)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    for (let row = 0; row < (fine ? 5 : 0); row++) {
+      const ry = -6.6 + row * 1.9;
+      for (let px = -14 + (row % 2) * 1.1; px < 13; px += 2.2) { ctx.moveTo(px - 1, ry); ctx.arc(px, ry, 1, Math.PI, 0, true); }
+    }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,170,150,0.22)'; ctx.lineWidth = 0.3; ctx.beginPath();
+    for (let px = -12 + 1.1; px < 11; px += 2.2) { ctx.moveTo(px - 0.7, -6.9); ctx.arc(px, -6.6, 0.75, Math.PI * 1.15, Math.PI * 1.85); }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(20,0,4,0.4)'; ctx.lineWidth = 0.6; ctx.beginPath();
+    ctx.moveTo(2.4, -6.6); ctx.quadraticCurveTo(7.6, -3.6, 6.4, 3); ctx.moveTo(-6, -4.6); ctx.quadraticCurveTo(-12.4, -1.6, -11, 4.4); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,160,130,0.25)'; ctx.lineWidth = 0.7; ctx.beginPath();
+    ctx.moveTo(3.4, -6.4); ctx.quadraticCurveTo(7.8, -4.8, 7.6, -1); ctx.moveTo(-7, -4.8); ctx.quadraticCurveTo(-11, -3.4, -11.6, -0.6); ctx.stroke();
     ctx.restore();
-    torso(); ctx.strokeStyle = INK; ctx.lineWidth = 0.45; ctx.stroke();
+    torso(); ctx.strokeStyle = INK; ctx.lineWidth = 0.5; ctx.stroke();
 
-    // Legs: a muscled hind leg folded back with talons trailing, and a
-    // clawed foreleg tucked under the chest
-    ctx.fillStyle = skin(0, 8);
-    ctx.beginPath(); ctx.ellipse(-8.6, 3, 4.6, 3.1, 0.5, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
-    ctx.strokeStyle = '#7A1217'; ctx.lineWidth = 2.1;
-    ctx.beginPath(); ctx.moveTo(-6.6, 5.4); ctx.lineTo(-11.6, 9.2); ctx.lineTo(-15, 10); ctx.stroke();
-    ctx.strokeStyle = GOLD1; ctx.lineWidth = 0.8; ctx.beginPath(); ctx.moveTo(-6.9, 6.2); ctx.lineTo(-11, 9.6); ctx.stroke();
-    ctx.strokeStyle = '#5E0A0F'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(7.6, 3.4); ctx.lineTo(5.8, 7.4); ctx.lineTo(9.4, 9); ctx.stroke();
-    ctx.fillStyle = BONE; ctx.beginPath();
-    [[-15, 10, -1], [-14.4, 10.6, -0.6], [-13.4, 10.4, 0.2]].forEach(([cx, cy, d]) => { ctx.moveTo(cx, cy - 0.5); ctx.quadraticCurveTo(cx - 1.4, cy + 0.2, cx - 1 + d, cy + 1.8); ctx.lineTo(cx + 0.4, cy + 0.4); ctx.closePath(); });
-    [[9.4, 9, 0], [9.8, 8.4, 0.4], [9, 9.5, -0.4]].forEach(([cx, cy, d]) => { ctx.moveTo(cx, cy - 0.45); ctx.quadraticCurveTo(cx + 1.4, cy - 0.2, cx + 1.3 + d, cy + 1.5); ctx.lineTo(cx - 0.3, cy + 0.4); ctx.closePath(); });
-    ctx.fill();
+    // The near legs: a muscled haunch with the shin folded back and talons
+    // trailing, and a clawed foreleg tucked under the chest
+    const hg = ctx.createRadialGradient(-10.4, 2, 0.5, -9.6, 3.4, 5.4);
+    hg.addColorStop(0, '#B8352A'); hg.addColorStop(0.65, '#8A1520'); hg.addColorStop(1, '#5A0912');
+    ctx.beginPath(); ctx.ellipse(-9.6, 3.4, 4.9, 3.3, 0.42, 0, Math.PI * 2); ctx.fillStyle = hg; ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
+    limb([{ x: -7.4, y: 6.4, w: 2 }, { x: -11.8, y: 9.8, w: 1.4 }, { x: -15.2, y: 10.8, w: 0.95 }]);
+    ctx.strokeStyle = GOLD1; ctx.lineWidth = 0.7; ctx.beginPath(); ctx.moveTo(-8, 7.8); ctx.lineTo(-11.6, 10.6); ctx.stroke();
+    claws([[-15.2, 10.8, 2.75, 2.6], [-14.8, 11.4, 2.35, 2.4], [-14, 11.6, 1.95, 2.2]], BONE);
+    limb([{ x: 9, y: 3.6, w: 1.9 }, { x: 7.2, y: 8.2, w: 1.35 }, { x: 10.6, y: 9.8, w: 0.9 }]);
+    claws([[10.6, 9.8, 0.55, 2.2], [10.9, 9.2, 0.1, 2.1], [10.2, 10.2, 1, 2]], BONE);
 
     // Neck and head, pivoting at the base of the neck: a gentle ripple
     // through the flight, plus `tilt` to aim
+    const [NPX, NPY] = DRAGON.pivot, [HX, HY] = DRAGON.head;
     ctx.save();
-    ctx.translate(8.5, -3.5); ctx.rotate(tilt + Math.sin(phase * 0.5 + 1) * 0.07); ctx.translate(-8.5, 3.5);
+    ctx.translate(NPX, NPY); ctx.rotate(tilt + Math.sin(phase * 0.5 + 1) * 0.07); ctx.translate(-NPX, -NPY);
     const neck = [];
-    for (let i = 0; i <= 8; i++) {
-      const t = i / 8, u = 1 - t;
-      neck.push({ x: u * u * 7.2 + 2 * u * t * 15 + t * t * 20.6, y: u * u * -2.6 + 2 * u * t * -9.6 + t * t * -10.2, w: 3.6 - t * 1.75 });
+    for (let i = 0; i <= 10; i++) {
+      const t = i / 10, u = 1 - t;
+      neck.push({ x: u * u * 8 + 2 * u * t * 16.5 + t * t * HX, y: u * u * -2.2 + 2 * u * t * -13.6 + t * t * HY, w: 4.9 - t * 2.5 });
     }
     // The neck runs toward the head, so its upper edge is the tube's `bot`
     const nt = tube(neck), crest = nt.bot, throat = nt.top;
-    outline(nt.top, nt.bot); ctx.fillStyle = skin(-12, 0); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
-    ctx.strokeStyle = GOLD0; ctx.lineCap = 'butt';
-    for (let i = 0; i < 8; i++) {
-      const b0 = throat[i], b1 = throat[i + 1];
-      ctx.lineWidth = neck[i].w * 0.7;
-      ctx.beginPath(); ctx.moveTo(b0.x + (neck[i].x - b0.x) * 0.3, b0.y + (neck[i].y - b0.y) * 0.3);
-      ctx.lineTo(b1.x + (neck[i + 1].x - b1.x) * 0.3, b1.y + (neck[i + 1].y - b1.y) * 0.3); ctx.stroke();
-    }
-    ctx.strokeStyle = 'rgba(90,30,10,0.5)'; ctx.lineWidth = 0.3; ctx.beginPath();
-    for (let i = 1; i < 8; i++) { const b = throat[i]; ctx.moveTo(b.x, b.y); ctx.lineTo(b.x + (neck[i].x - b.x) * 0.6, b.y + (neck[i].y - b.y) * 0.6); }
+    outline(nt.top, nt.bot); ctx.fillStyle = skin(-14, 0); ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.45; ctx.stroke();
+    this.dragonPlates(throat, neck, '#EDA24A', 'rgba(110,40,10,0.55)');
+    ctx.strokeStyle = 'rgba(24,0,4,0.3)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    for (let i = 1; i < 10; i++) { const c = crest[i], p = neck[i]; ctx.moveTo(c.x + (p.x - c.x) * 0.2, c.y + (p.y - c.y) * 0.2); ctx.quadraticCurveTo(p.x + 0.6, p.y, p.x + (throat[i].x - p.x) * 0.4, p.y + (throat[i].y - p.y) * 0.4); }
     ctx.stroke();
-    ctx.lineCap = 'round';
-    spikes(() => { for (let i = 1; i < 8; i++) edgeSpike(crest[i], 2.2 - i * 0.12, 0.8); });
+    stroke(crest.slice(1), RIM, 0.55);
+    spikes(() => { for (let i = 1; i < 10; i++) edgeSpike(crest[i], 2.6 - i * 0.13, 0.85); });
     if (inner > 0) {
       ctx.save(); ctx.globalCompositeOperation = 'lighter';
-      [[0.15, 3.6], [0.45, 3], [0.75, 2.6]].forEach(([t, r]) => {
-        const p = neck[Math.round(t * 8)], fl2 = 0.8 + Math.sin(ts * 0.02 + t * 9) * 0.2;
-        ctx.globalAlpha = inner * 0.55 * fl2; ctx.drawImage(fire[2], p.x - r, p.y + 0.6 - r, r * 2, r * 2);
+      [[0.15, 4], [0.45, 3.4], [0.75, 2.8]].forEach(([t, r]) => {
+        const p = neck[Math.round(t * 10)], fl2 = 0.8 + Math.sin(ts * 0.02 + t * 9) * 0.2;
+        ctx.globalAlpha = inner * 0.6 * fl2; ctx.drawImage(fire[2], p.x - r, p.y + 0.8 - r, r * 2, r * 2);
       });
       ctx.restore();
     }
 
     // Head, tipped down a touch at the end of the neck
-    ctx.save(); ctx.translate(20.6, -10.3); ctx.rotate(0.08); ctx.scale(1.16, 1.16);
+    ctx.save(); ctx.translate(HX, HY); ctx.rotate(DRAGON.headRot); ctx.scale(DRAGON.headScale, DRAGON.headScale);
     const horn = (dx, dy, k2, near) => {
       ctx.beginPath();
-      ctx.moveTo(0.6 + dx, -2.5 + dy);
-      ctx.quadraticCurveTo(-4 * k2 + dx, -4.8 * k2 + dy, -9.6 * k2 + dx, -6.9 * k2 + dy);
-      ctx.quadraticCurveTo(-4.2 * k2 + dx, -3.3 * k2 + dy, -1.4 + dx, -1 + dy);
+      ctx.moveTo(2.2 + dx, -3.5 + dy);
+      ctx.quadraticCurveTo(-4 * k2 + dx, -6.2 * k2 + dy, -11.2 * k2 + dx, -9.4 * k2 + dy);
+      ctx.quadraticCurveTo(-5 * k2 + dx, -4.6 * k2 + dy, -1.4 + dx, -2 + dy);
       ctx.closePath();
-      const hg = ctx.createLinearGradient(dx, dy - 2, -9.6 * k2 + dx, -6.9 * k2 + dy);
-      hg.addColorStop(0, near ? BONE : '#B4A28E'); hg.addColorStop(1, near ? '#5E4C40' : '#3C2E26');
-      ctx.fillStyle = hg; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
-      ctx.strokeStyle = 'rgba(60,40,28,0.5)'; ctx.lineWidth = 0.3; ctx.beginPath();
-      for (let r = 1; r <= 3; r++) { const t = r / 4.2, hx = dx + (-9.6 * k2) * t * 0.95, hy = dy - 2.2 + (-6.9 * k2 + 2.2) * t; ctx.moveTo(hx + 0.2, hy - 0.9 + t * 0.3); ctx.lineTo(hx - 0.3, hy + 0.9 - t * 0.6); }
+      const g = ctx.createLinearGradient(dx, dy - 3, -11.2 * k2 + dx, -9.4 * k2 + dy);
+      g.addColorStop(0, near ? BONE : '#A8957E'); g.addColorStop(0.6, near ? '#B8A386' : '#5E4C3E'); g.addColorStop(1, near ? '#4E3C30' : '#2E221C');
+      ctx.fillStyle = g; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+      ctx.strokeStyle = 'rgba(60,40,28,0.55)'; ctx.lineWidth = 0.3; ctx.beginPath();
+      for (let r = 1; r <= 4; r++) {
+        const t = r / 5.2, hx = dx + 0.4 + (-11.2 * k2 - 0.4) * t, hy = dy - 2.8 + (-9.4 * k2 + 2.8) * t;
+        ctx.moveTo(hx + 0.5, hy - 1.1 + t * 0.5); ctx.lineTo(hx - 0.4, hy + 1 - t * 0.6);
+      }
       ctx.stroke();
     };
-    horn(1.3, -0.7, 0.86, false);
+    horn(1.6, -0.8, 0.88, false);
+    // A webbed frill fanning back from the jaw
+    const frill = [[-7.8, -1.8], [-8, 1.6], [-6.2, 4.6]];
+    ctx.beginPath(); ctx.moveTo(-1, -1);
+    frill.forEach(([fx, fy], i) => {
+      const [px, py] = i ? frill[i - 1] : [-1, -1];
+      ctx.quadraticCurveTo((px + fx) / 2 + 1.4, (py + fy) / 2, fx, fy);
+    });
+    ctx.quadraticCurveTo(-3.4, 2.6, -0.6, 2.2); ctx.closePath();
+    const fg = ctx.createRadialGradient(-1, 0.6, 0.5, -1, 0.6, 8);
+    fg.addColorStop(0, '#5A0A12'); fg.addColorStop(0.7, '#A82422'); fg.addColorStop(1, '#F07038');
+    ctx.fillStyle = fg; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+    spikes(() => frill.forEach(([fx, fy]) => { const L = Math.hypot(fx + 1, fy - 0.6); spike(-1, 0.6, (fx + 1) / L, (fy - 0.6) / L, L + 0.8, 0.5); }));
     // Lower jaw, hinged under the cheek; the dark mouth shows as it opens
-    const ja = jaw * 0.42;
+    const ja = jaw * 0.5;
     if (ja > 0.02) {
-      ctx.fillStyle = '#250306';
-      ctx.beginPath(); ctx.moveTo(2.2, 1.2); ctx.lineTo(12.6, 0.9);
-      ctx.lineTo(2.6 + Math.cos(ja) * 10.2, 1.2 + Math.sin(ja) * 10.2); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#2A0307';
+      ctx.beginPath(); ctx.moveTo(2.2, 1.2); ctx.lineTo(15.2, 1.2);
+      ctx.lineTo(2.6 + Math.cos(ja) * 13, 1.4 + Math.sin(ja) * 13); ctx.closePath(); ctx.fill();
       if (inner > 0 || jaw > 0.5) {
-        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = Math.max(inner, jaw) * 0.8;
-        ctx.drawImage(fire[1], 6.5 - 4, 3 - 4, 8, 8); ctx.restore();
+        ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = Math.max(inner, jaw) * 0.85;
+        ctx.drawImage(fire[1], 8 - 5, 3.4 - 5, 10, 10); ctx.restore();
       }
     }
-    ctx.save(); ctx.translate(2.6, 1.2); ctx.rotate(ja);
+    ctx.save(); ctx.translate(2.6, 1.4); ctx.rotate(ja);
     ctx.fillStyle = BONE; ctx.beginPath();
-    for (let tx = 4.2; tx < 10; tx += 1.15) { ctx.moveTo(tx - 0.4, 0.1); ctx.lineTo(tx, -1.05 - (tx > 8.6 ? 0.4 : 0)); ctx.lineTo(tx + 0.4, 0.1); ctx.closePath(); }
+    for (let tx = 4.6; tx < 12.6; tx += 1.2) { const big = tx > 11.4 ? 0.6 : 0; ctx.moveTo(tx - 0.42, 0.1); ctx.lineTo(tx, -1.05 - big); ctx.lineTo(tx + 0.42, 0.1); ctx.closePath(); }
     ctx.fill();
-    ctx.beginPath(); ctx.moveTo(-0.8, -0.2); ctx.quadraticCurveTo(4.5, 0.2, 9.8, 0); ctx.lineTo(10.3, 0.5); ctx.quadraticCurveTo(5.5, 2.3, 0.2, 1.8); ctx.closePath();
-    const jg = ctx.createLinearGradient(0, -0.2, 0, 2.2); jg.addColorStop(0, '#8A161B'); jg.addColorStop(1, GOLD1);
+    ctx.beginPath(); ctx.moveTo(-1.4, -0.3); ctx.quadraticCurveTo(6, 0.2, 12.8, -0.1); ctx.lineTo(13.2, 0.5); ctx.quadraticCurveTo(7, 3, 0, 2.6); ctx.closePath();
+    const jg = ctx.createLinearGradient(0, -0.3, 0, 2.8); jg.addColorStop(0, '#8E161C'); jg.addColorStop(1, GOLD1);
     ctx.fillStyle = jg; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.35; ctx.stroke();
+    stroke([{ x: 0.6, y: 2.5 }, { x: 6.6, y: 2.3 }, { x: 12.4, y: 0.6 }], UNDER, 0.5);
+    spikes(() => { spike(1.2, 2.4, -0.5, 0.86, 1.8, 0.45); spike(3.4, 2.6, -0.4, 0.92, 1.5, 0.4); spike(5.6, 2.5, -0.3, 0.95, 1.2, 0.35); });
     ctx.restore();
-    // Upper fangs, then the skull over their roots
+    // Upper fangs, a long one at the front, then the skull over their roots
     ctx.fillStyle = BONE; ctx.beginPath();
-    for (let tx = 4.6; tx < 12.2; tx += 1.15) { const big = tx > 11 ? 0.6 : 0; ctx.moveTo(tx - 0.42, 0.9); ctx.lineTo(tx + 0.1, 2.15 + big); ctx.lineTo(tx + 0.42, 0.9); ctx.closePath(); }
+    for (let tx = 5; tx < 15; tx += 1.2) { const big = tx > 13 ? 0.9 : 0; ctx.moveTo(tx - 0.44, 1); ctx.lineTo(tx + 0.12, 2.2 + big); ctx.lineTo(tx + 0.44, 1); ctx.closePath(); }
     ctx.fill();
     const head = () => {
-      ctx.beginPath(); ctx.moveTo(-1.8, -1.2);
-      ctx.quadraticCurveTo(1.2, -3.3, 5.2, -2.7); ctx.lineTo(6.4, -3.15);
-      ctx.quadraticCurveTo(9.6, -2.3, 12.4, -1.1); ctx.quadraticCurveTo(13.5, -0.7, 13.4, 0.3); ctx.lineTo(12.6, 1);
-      ctx.quadraticCurveTo(8, 1.3, 3.4, 1.4); ctx.quadraticCurveTo(0.4, 1.8, -1.8, 0.9); ctx.closePath();
+      ctx.beginPath(); ctx.moveTo(-2.6, -2.2);
+      ctx.quadraticCurveTo(0.5, -4.6, 4.6, -4.1); ctx.quadraticCurveTo(6.4, -4.7, 7.9, -3.6);
+      ctx.quadraticCurveTo(11.5, -2.6, 14.6, -1.4); ctx.quadraticCurveTo(16.5, -0.8, 16.2, 0.4); ctx.lineTo(15.4, 1.3);
+      ctx.quadraticCurveTo(9, 1.5, 3.2, 1.6); ctx.quadraticCurveTo(0, 2.6, -2.7, 1.6); ctx.closePath();
     };
-    const hg2 = ctx.createLinearGradient(0, -3.3, 0, 1.6);
-    hg2.addColorStop(0, '#7A1116'); hg2.addColorStop(0.55, '#B22A25'); hg2.addColorStop(1, '#6A0C10');
-    head(); ctx.fillStyle = hg2; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.4; ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,200,180,0.45)'; ctx.lineWidth = 0.35;
-    ctx.beginPath(); ctx.moveTo(-1, -1.9); ctx.quadraticCurveTo(2, -3.1, 5.2, -2.75); ctx.moveTo(6.8, -3); ctx.quadraticCurveTo(9.6, -2.2, 12.2, -1.15); ctx.stroke();
-    ctx.strokeStyle = 'rgba(30,0,4,0.4)'; ctx.beginPath(); ctx.moveTo(3.6, 0.2); ctx.quadraticCurveTo(7.5, -0.2, 11.4, -0.1); ctx.stroke();
-    // Cheek spikes and a frill of spines behind the head
-    spikes(() => {
-      spike(-1.2, 0.5, -0.92, 0.38, 2.6, 0.55); spike(-0.4, 1.3, -0.8, 0.6, 2, 0.45);
-      spike(-1.5, -0.9, -0.98, -0.2, 2.2, 0.5);
-    });
+    const hg2 = ctx.createLinearGradient(0, -4.6, 0, 2);
+    hg2.addColorStop(0, '#5E0A12'); hg2.addColorStop(0.5, '#B22A25'); hg2.addColorStop(1, '#6E0E12');
+    head(); ctx.fillStyle = hg2; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.42; ctx.stroke();
+    ctx.save(); head(); ctx.clip();
+    // Scale ridges down the snout, the cheek line and a darker lip
+    ctx.strokeStyle = 'rgba(30,0,4,0.42)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    ctx.moveTo(3.6, 0.2); ctx.quadraticCurveTo(8.5, -0.3, 14.4, 0.1);
+    ctx.moveTo(-1.6, -0.6); ctx.quadraticCurveTo(0.8, 0.6, 3.6, 0.2);
+    for (let sx2 = 9; sx2 < 15; sx2 += 1.5) { ctx.moveTo(sx2, -2.9 + (sx2 - 9) * 0.25); ctx.lineTo(sx2 + 0.5, -1.7 + (sx2 - 9) * 0.22); }
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,150,80,0.22)'; ctx.beginPath(); ctx.ellipse(8, 1.3, 7, 0.9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = RIM; ctx.lineWidth = 0.45; ctx.beginPath();
+    ctx.moveTo(-1.8, -2.8); ctx.quadraticCurveTo(0.8, -4.6, 4.6, -4.25); ctx.moveTo(8.1, -3.75); ctx.quadraticCurveTo(11.6, -2.8, 14.6, -1.6); ctx.stroke();
+    // Cheek horn, a nose horn and a spur over the brow
+    ctx.beginPath(); ctx.moveTo(-0.6, 0.2); ctx.quadraticCurveTo(-4.8, 0.4, -9, 2.4); ctx.quadraticCurveTo(-4.4, 2.2, -0.8, 1.8); ctx.closePath();
+    ctx.fillStyle = '#C8B496'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+    spikes(() => { spike(13.2, -1.75, -0.3, -0.95, 1.7, 0.55); spike(12, -2.1, -0.4, -0.92, 1.1, 0.4); spike(7.4, -3.9, -0.6, -0.8, 1.8, 0.55); });
     horn(0, 0, 1, true);
-    // Brow ridge over a glowing slit eye
-    ctx.fillStyle = '#3A0508';
-    ctx.beginPath(); ctx.moveTo(3.4, -2.2); ctx.quadraticCurveTo(5.4, -3.1, 7.2, -2.3); ctx.lineTo(6.6, -1.7); ctx.quadraticCurveTo(5.2, -2.2, 3.6, -1.6); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#1A0204'; ctx.beginPath(); ctx.ellipse(5.4, -1.2, 1.35, 0.72, -0.12, 0, Math.PI * 2); ctx.fill();
-    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.6; ctx.drawImage(fire[2], 5.4 - 3.4, -1.2 - 3.4, 6.8, 6.8); ctx.restore();
-    const eg = ctx.createRadialGradient(5.3, -1.35, 0, 5.4, -1.2, 1.1);
-    eg.addColorStop(0, '#FFF6C0'); eg.addColorStop(0.5, '#FFC23A'); eg.addColorStop(1, '#E2561C');
-    ctx.fillStyle = eg; ctx.beginPath(); ctx.ellipse(5.4, -1.2, 1.05, 0.55, -0.12, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#120002'; ctx.beginPath(); ctx.ellipse(5.5, -1.2, 0.17, 0.5, 0, 0, Math.PI * 2); ctx.fill();
+    // A heavy brow over a glowing slit eye
+    ctx.fillStyle = '#300409';
+    ctx.beginPath(); ctx.moveTo(3.9, -3.2); ctx.quadraticCurveTo(6.4, -4.5, 8.9, -3.3); ctx.lineTo(8.2, -2.5); ctx.quadraticCurveTo(6.4, -3.1, 4.4, -2.3); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#160103'; ctx.beginPath(); ctx.ellipse(6.6, -2.2, 1.55, 0.85, -0.12, 0, Math.PI * 2); ctx.fill();
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.65; ctx.drawImage(fire[2], 6.6 - 3.8, -2.2 - 3.8, 7.6, 7.6); ctx.restore();
+    const eg = ctx.createRadialGradient(6.4, -2.35, 0, 6.6, -2.2, 1.2);
+    eg.addColorStop(0, '#FFF8C8'); eg.addColorStop(0.45, '#FFC83A'); eg.addColorStop(1, '#E0501A');
+    ctx.fillStyle = eg; ctx.beginPath(); ctx.ellipse(6.6, -2.2, 1.2, 0.62, -0.12, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#120002'; ctx.beginPath(); ctx.ellipse(6.75, -2.2, 0.18, 0.56, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.beginPath(); ctx.arc(6.25, -2.45, 0.16, 0, Math.PI * 2); ctx.fill();
     // Nostril, smouldering when there's fire in the throat
-    ctx.fillStyle = '#1A0204'; ctx.beginPath(); ctx.ellipse(12.1, -0.45, 0.48, 0.26, -0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1A0204'; ctx.beginPath(); ctx.ellipse(15, -0.45, 0.55, 0.28, -0.3, 0, Math.PI * 2); ctx.fill();
     if (inner > 0) {
-      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.7;
-      ctx.drawImage(fire[3], 12.1 - 1.8, -0.45 - 1.8, 3.6, 3.6); ctx.restore();
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.75;
+      ctx.drawImage(fire[3], 15 - 2, -0.45 - 2, 4, 4); ctx.restore();
     }
     ctx.restore();
     ctx.restore();
 
-    // Spines down the back, then moonlight along the top edge and the
-    // stadium's warm light under the belly
-    spikes(() => {
-      [[6.2, -6.4, 3.2], [2.7, -7.1, 3.6], [-0.8, -6.9, 3.4], [-4.3, -6, 3], [-7.8, -4.7, 2.6], [-11, -2.9, 2]].forEach(([px, py, l]) => spike(px, py, -0.42, -0.91, l, l * 0.46));
+    // A crest of spines down the back with skin webbed between them, then
+    // moonlight along the top edge and the stadium's warm light under the
+    // belly
+    const dorsal = [[11, -7, 2.6], [7.6, -8.3, 3.6], [4, -8.4, 4.4], [0.4, -7.9, 4.4], [-3.2, -7.1, 4], [-6.8, -5.9, 3.5], [-10.2, -4.3, 3], [-13.4, -2.4, 2.4]];
+    const DX = -0.45, DY = -0.89;
+    ctx.beginPath(); ctx.moveTo(dorsal[0][0], dorsal[0][1]);
+    dorsal.forEach(([px, py, l], i) => {
+      const tx = px + DX * l, ty = py + DY * l;
+      if (i) { const [qx, qy, ql] = dorsal[i - 1]; ctx.quadraticCurveTo((qx + DX * ql + tx) / 2 + 0.3, (qy + DY * ql + ty) / 2 + 1.6, tx, ty); } else ctx.lineTo(tx, ty);
     });
-    ctx.strokeStyle = 'rgba(255,214,206,0.5)'; ctx.lineWidth = 0.55;
-    ctx.beginPath(); ctx.moveTo(-12.4, -1.9); ctx.bezierCurveTo(-6, -6.7, 2, -8.1, 7.8, -6.5); ctx.stroke();
-    ctx.strokeStyle = 'rgba(255,170,96,0.4)'; ctx.lineWidth = 0.8;
-    ctx.beginPath(); ctx.moveTo(-10, 5); ctx.bezierCurveTo(-4, 7, 6, 7.6, 12.2, 3.6); ctx.stroke();
+    for (let i = dorsal.length - 1; i >= 0; i--) ctx.lineTo(dorsal[i][0], dorsal[i][1] + 0.6);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(120,20,26,0.9)'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 0.3; ctx.stroke();
+    spikes(() => dorsal.forEach(([px, py, l]) => spike(px, py, DX, DY, l + 0.6, l * 0.36)));
+    ctx.strokeStyle = RIM; ctx.lineWidth = 0.6;
+    ctx.beginPath(); ctx.moveTo(-15, -1.5); ctx.bezierCurveTo(-10, -6.7, -2, -7.9, 4, -8.5); ctx.bezierCurveTo(8.4, -8.9, 11.6, -7.5, 13, -4.6); ctx.stroke();
+    ctx.strokeStyle = UNDER; ctx.lineWidth = 0.9;
+    ctx.beginPath(); ctx.moveTo(-12, 5.6); ctx.bezierCurveTo(-6, 8, 4, 9.2, 12.6, 4.6); ctx.stroke();
     if (inner > 0) {
-      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.4 * (0.85 + Math.sin(ts * 0.017) * 0.15);
-      ctx.drawImage(fire[3], 7 - 6, 2 - 6, 12, 12); ctx.restore();
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = inner * 0.42 * (0.85 + Math.sin(ts * 0.017) * 0.15);
+      ctx.drawImage(fire[3], 7.5 - 7, 2 - 7, 14, 14); ctx.restore();
     }
 
-    wing(3.5, -4.8, 1, true);
+    wing(4.5, -5.8, true);
     ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
     ctx.restore();
+  }
+
+  // The dragon's belly plates along one edge of a tube (see drawDragon):
+  // a band from `edge` reaching 60% of the way in toward the spine
+  // points `mid`, split into plates by seams, lit along its inner edge.
+  dragonPlates(edge, mid, fill, seam) {
+    const ctx = this.ctx, inner = edge.map((e, i) => ({ x: e.x + (mid[i].x - e.x) * 0.6, y: e.y + (mid[i].y - e.y) * 0.6 }));
+    ctx.beginPath(); ctx.moveTo(edge[0].x, edge[0].y);
+    for (let i = 1; i < edge.length; i++) ctx.lineTo(edge[i].x, edge[i].y);
+    for (let i = inner.length - 1; i >= 0; i--) ctx.lineTo(inner[i].x, inner[i].y);
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+    ctx.strokeStyle = seam; ctx.lineWidth = 0.35; ctx.beginPath();
+    for (let i = 1; i < edge.length - 1; i++) { ctx.moveTo(edge[i].x, edge[i].y); ctx.lineTo(inner[i].x, inner[i].y); }
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,228,170,0.4)'; ctx.beginPath(); ctx.moveTo(inner[0].x, inner[0].y);
+    for (let i = 1; i < inner.length; i++) ctx.lineTo(inner[i].x, inner[i].y);
+    ctx.stroke();
   }
 
   // ── Ground (world-space — scrolls with camX/camY like the ramp and biker) ──
@@ -2267,10 +2387,10 @@ export class BikeGame {
     const ctx = this.ctx;
 
     // Sandy pit floor, darkening toward the bottom of the screen
-    const top = H * 0.72, trackH = H * TRACK_FRAC;
-    const soil = ctx.createLinearGradient(0, H * 0.70, 0, H);
-    soil.addColorStop(0, '#76522F'); soil.addColorStop(0.3, '#5E4125'); soil.addColorStop(0.7, '#3A2715'); soil.addColorStop(1, '#1C120A');
-    ctx.fillStyle = soil; ctx.fillRect(0, H * 0.70, W, H * 0.30);
+    const top = r.gY, trackH = this.trackHeight(W, H);
+    const soil = ctx.createLinearGradient(0, top - H * 0.02, 0, H);
+    soil.addColorStop(0, '#80592F'); soil.addColorStop(0.3, '#684828'); soil.addColorStop(0.7, '#442D17'); soil.addColorStop(1, '#22160B');
+    ctx.fillStyle = soil; ctx.fillRect(0, top - H * 0.02, W, H - top + H * 0.02);
 
     // Groomed track surface with a bumpy leading edge
     const track = ctx.createLinearGradient(0, top, 0, top + trackH);
@@ -2326,11 +2446,12 @@ export class BikeGame {
     // ensureGroundTexture) into its own small offscreen strip and every
     // frame just gets blitted back with a cheap drawImage at the right
     // scroll offset — same scrolling look, a fraction of the draw calls.
-    this.drawGroundTexture(W, H);
+    this.drawGroundTexture(W, H, top);
 
     // Biker graveyard — wrecked bikes/skulls/bones from past runs, sitting
     // right on the bumpy ground so they scroll and settle with the track.
     this.drawWrecks(W, H, ts, r);
+    this.drawRollingTumbleweed(W, H, ts, r);
 
     // Distance markers (world-space, scrolling) — neon green to match the HUD.
     // Only the 100m marks get a (centered, glowing) label; the 25/50/75m
@@ -2344,10 +2465,11 @@ export class BikeGame {
       ctx.strokeStyle = major ? '#2EE59D' : 'rgba(46,229,157,0.4)';
       ctx.lineWidth = major ? 1.6 : 1;
       ctx.shadowColor = '#2EE59D'; ctx.shadowBlur = major ? 6 : 0;
-      ctx.beginPath(); ctx.moveTo(sx, H * 0.72); ctx.lineTo(sx, major ? H * 0.756 : H * 0.736); ctx.stroke();
+      const mk = Math.min(H, W * 1.15);
+      ctx.beginPath(); ctx.moveTo(sx, top); ctx.lineTo(sx, top + (major ? mk * 0.036 : mk * 0.016)); ctx.stroke();
       if (major && d > 0) {
         ctx.fillStyle = '#2EE59D';
-        ctx.fillText(d + 'm', sx, H * 0.79);
+        ctx.fillText(d + 'm', sx, top + Math.min(H, W * 1.15) * 0.07);
       }
       ctx.shadowBlur = 0;
     }
@@ -2389,11 +2511,11 @@ export class BikeGame {
   // changes — the pattern itself never needs to change, only where it's
   // sampled from, which drawGroundTexture handles every frame with a cheap
   // drawImage offset instead of regenerating any pixels.
-  ensureGroundTexture(W, H) {
-    if (this._groundBands && this._groundW === W && this._groundH === H) return;
-    this._groundW = W; this._groundH = H;
+  ensureGroundTexture(W, H, groundTop) {
+    if (this._groundBands && this._groundW === W && this._groundH === H && this._groundTop === groundTop) return;
+    this._groundW = W; this._groundH = H; this._groundTop = groundTop;
     this._groundBands = [];
-    const groundTop = H * 0.72, groundH = H - groundTop;
+    const groundH = H - groundTop;
     const dpr = this.dpr;
 
     const makeBand = (span, bandTop, bandH, speed, paint) => {
@@ -2452,8 +2574,8 @@ export class BikeGame {
           const x0 = (hx - Math.floor(hx)) * span;
           const cy = (rowY - bandTop) + (Math.sin(seed * 12.9) * 0.5 + 0.5) * groundH * 0.1 * (0.5 + rt);
           const size = 1.6 + rt * 4.4;
-          const kind = Math.floor((hk - Math.floor(hk)) * 8);
-          const reach = size * 8;
+          const kind = Math.floor((hk - Math.floor(hk)) * 12);
+          const reach = size * 10;
           const paint = (cx) => {
             if (kind === 5 || kind === 7) {
               // Wind ripples: a few parallel crests, lit on top, shadowed below
@@ -2494,10 +2616,66 @@ export class BikeGame {
               g.addColorStop(0, 'rgba(175,132,72,0.2)'); g.addColorStop(1, 'rgba(175,132,72,0)');
               bctx.fillStyle = g; bctx.beginPath(); bctx.arc(cx, cy, size * 3.2, 0, Math.PI * 2); bctx.fill();
             } else if (kind === 3) {
-              bctx.strokeStyle = 'rgba(95,115,42,0.5)'; bctx.lineWidth = 1;
-              [-1, 0, 1].forEach(o => {
-                bctx.beginPath(); bctx.moveTo(cx + o * 1.5, cy); bctx.lineTo(cx + o * 2.4, cy - size * 1.4); bctx.stroke();
-              });
+              // A dry grass tuft: blades fanning up and bending over
+              bctx.lineCap = 'round'; bctx.lineWidth = Math.max(0.5, size * 0.13);
+              for (let k = -3; k <= 3; k++) {
+                const lean = k * 0.3 + Math.sin(seed + k) * 0.12, L = size * (1.8 - Math.abs(k) * 0.14);
+                bctx.strokeStyle = k % 3 === 0 ? 'rgba(128,124,64,0.75)' : k % 2 ? 'rgba(196,164,96,0.7)' : 'rgba(164,138,76,0.7)';
+                bctx.beginPath(); bctx.moveTo(cx + k * size * 0.08, cy);
+                bctx.quadraticCurveTo(cx + k * size * 0.08 + lean * L * 0.4, cy - L * 0.75, cx + k * size * 0.08 + lean * L * 0.9, cy - L * (0.85 - Math.abs(lean) * 0.25));
+                bctx.stroke();
+              }
+            } else if (kind === 8) {
+              // Cracks in the dried mud: a few jagged lines branching off
+              // one another, dark in the gap and lit along one lip
+              let px = cx - size * 3, py = cy;
+              const pts = [[px, py]];
+              for (let k = 0; k < 6; k++) { px += size * (0.8 + ((seed * 7 + k * 3) % 5) * 0.2); py = cy + Math.sin(seed * 1.7 + k * 2.1) * size * 0.7; pts.push([px, py]); }
+              const crack = (list, w) => {
+                bctx.lineWidth = w; bctx.strokeStyle = 'rgba(22,12,4,0.7)';
+                bctx.beginPath(); list.forEach(([qx, qy], j) => (j ? bctx.lineTo(qx, qy) : bctx.moveTo(qx, qy))); bctx.stroke();
+                bctx.lineWidth = w * 0.6; bctx.strokeStyle = 'rgba(232,192,140,0.24)';
+                bctx.beginPath(); list.forEach(([qx, qy], j) => (j ? bctx.lineTo(qx, qy + w) : bctx.moveTo(qx, qy + w))); bctx.stroke();
+              };
+              bctx.lineJoin = 'round';
+              crack(pts, Math.max(0.7, size * 0.28));
+              [2, 4].forEach((j) => crack([pts[j], [pts[j][0] + size * 0.6, pts[j][1] + size * (j === 2 ? -1.6 : 1.4)], [pts[j][0] + size * 1.5, pts[j][1] + size * (j === 2 ? -2.2 : 2)]], Math.max(0.5, size * 0.14)));
+              bctx.lineJoin = 'miter';
+            } else if (kind === 9) {
+              // An old tyre track: a shallow rut curving across the dirt,
+              // its tread pattern stamped along it
+              const len = size * 16, bend = Math.sin(seed) * size * 1.6;
+              bctx.lineCap = 'round';
+              bctx.strokeStyle = 'rgba(28,16,6,0.36)'; bctx.lineWidth = size * 1.05;
+              bctx.beginPath(); bctx.moveTo(cx - len / 2, cy); bctx.quadraticCurveTo(cx, cy + bend, cx + len / 2, cy); bctx.stroke();
+              bctx.strokeStyle = 'rgba(226,186,130,0.14)'; bctx.lineWidth = size * 0.25;
+              bctx.beginPath(); bctx.moveTo(cx - len / 2, cy + size * 0.5); bctx.quadraticCurveTo(cx, cy + bend + size * 0.5, cx + len / 2, cy + size * 0.5); bctx.stroke();
+              bctx.strokeStyle = 'rgba(22,12,4,0.42)'; bctx.lineWidth = Math.max(0.45, size * 0.18);
+              bctx.beginPath();
+              for (let t = 0.04; t < 0.96; t += 0.06) {
+                const tx = cx - len / 2 + len * t, ty = cy + bend * 2 * t * (1 - t);
+                bctx.moveTo(tx - size * 0.2, ty - size * 0.32); bctx.lineTo(tx + size * 0.12, ty); bctx.lineTo(tx - size * 0.2, ty + size * 0.32);
+              }
+              bctx.stroke(); bctx.lineCap = 'butt';
+            } else if (kind === 10) {
+              // A little scatter of pebbles, each lit on top with a shadow
+              for (let k = 0; k < 5; k++) {
+                const px = cx + Math.sin(seed * 3 + k * 2.4) * size * 1.6, py = cy + Math.cos(seed * 5 + k * 1.7) * size * 0.5;
+                const pr = size * (0.28 + ((seed + k) % 3) * 0.1);
+                bctx.fillStyle = 'rgba(14,8,2,0.35)'; bctx.beginPath(); bctx.ellipse(px + pr * 0.3, py + pr * 0.5, pr * 1.2, pr * 0.5, 0, 0, Math.PI * 2); bctx.fill();
+                bctx.fillStyle = `rgb(${118 + k * 9},${98 + k * 6},${76 + k * 4})`; bctx.beginPath(); bctx.ellipse(px, py, pr, pr * 0.78, 0, 0, Math.PI * 2); bctx.fill();
+                bctx.fillStyle = 'rgba(255,238,210,0.32)'; bctx.beginPath(); bctx.ellipse(px - pr * 0.3, py - pr * 0.35, pr * 0.45, pr * 0.28, -0.3, 0, Math.PI * 2); bctx.fill();
+              }
+            } else if (kind === 11) {
+              // A dead, twiggy little shrub
+              bctx.lineCap = 'round'; bctx.strokeStyle = 'rgba(70,52,36,0.8)';
+              const twig = (x0, y0, a, L, w, depth) => {
+                const x1 = x0 + Math.sin(a) * L, y1 = y0 - Math.cos(a) * L;
+                bctx.lineWidth = w; bctx.beginPath(); bctx.moveTo(x0, y0); bctx.lineTo(x1, y1); bctx.stroke();
+                if (depth > 0) { twig(x1, y1, a - 0.5, L * 0.66, w * 0.65, depth - 1); twig(x1, y1, a + 0.45, L * 0.62, w * 0.65, depth - 1); }
+              };
+              [-0.5, 0.1, 0.6].forEach((a, k) => twig(cx + (k - 1) * size * 0.2, cy, a, size * 1.1, Math.max(0.5, size * 0.2), 2));
+              bctx.lineCap = 'butt';
             } else {
               bctx.fillStyle = `rgba(${95 + (seed * 3) % 45},${62 + (seed * 2) % 28},${30 + seed % 18},0.6)`;
               bctx.beginPath(); bctx.arc(cx, cy, Math.max(1, size * 0.35), 0, Math.PI * 2); bctx.fill();
@@ -2516,8 +2694,8 @@ export class BikeGame {
   // calls (each band drawn up to twice, to tile seamlessly across the
   // viewport) standing in for what used to be ~500 individual primitive
   // draws every single frame.
-  drawGroundTexture(W, H) {
-    this.ensureGroundTexture(W, H);
+  drawGroundTexture(W, H, groundTop) {
+    this.ensureGroundTexture(W, H, groundTop);
     const ctx = this.ctx;
     this._groundBands.forEach(({ canvas, span, bandTop, bandH, speed }) => {
       let shift = (this.camX * speed) % span;
@@ -2559,6 +2737,17 @@ export class BikeGame {
 
     this.aisleFracs = [0.33, 0.67];
     const inAisle = (f) => this.aisleFracs.some((a) => Math.abs(f - a) < 0.016);
+    // Each section has its own colour that most of its fans wear — the home
+    // end in green, the middle in white, navy and green up top — so the
+    // stands read as blocks of supporters instead of confetti
+    const SECTION = { lower: ['#2EE59D', '#E8EEF6', '#2EE59D'], upper: ['#1E3A66', '#2EE59D', '#1E3A66'] };
+    const sectionOf = (f) => (f < this.aisleFracs[0] ? 0 : f < this.aisleFracs[1] ? 1 : 2);
+    // The far tier sits back in the night air: its colours fade toward the
+    // blue of the bowl
+    const fade = (hex, k) => {
+      const n = parseInt(hex.slice(1), 16), c = [n >> 16, (n >> 8) & 255, n & 255], to = [22, 32, 58];
+      return '#' + c.map((v, i) => Math.round(v + (to[i] - v) * k).toString(16).padStart(2, '0')).join('');
+    };
 
     const DECKS = [
       { deck: 'upper', rows: g.upperRows, depthFrom: 0.08, depthTo: 0.34 },
@@ -2577,11 +2766,13 @@ export class BikeGame {
         for (let i = 0; i < count; i++) {
           const xFrac = (i + (r % 2 ? 0.75 : 0.25) + (rand() - 0.5) * 0.3) / count;
           if (inAisle(xFrac) || rand() < 0.04) continue; // a few empty seats let the seat colors show through
-          const cap = rand() < 0.16 ? CAPS[(rand() * CAPS.length) | 0] : null;
+          const capRaw = rand() < 0.16 ? CAPS[(rand() * CAPS.length) | 0] : null, far = deck === 'upper' ? 0.32 : 0;
+          const shirt = rand() < 0.55 ? SECTION[deck][sectionOf(xFrac)] : pick(SHIRTS);
+          const cap = capRaw && fade(capRaw, far);
           seats.push({
             xFrac,
-            shirt: pick(SHIRTS),
-            skin: SKINS[(rand() * SKINS.length) | 0],
+            shirt: fade(shirt, far),
+            skin: fade(SKINS[(rand() * SKINS.length) | 0], far * 0.6),
             hair: HAIRS[(rand() * HAIRS.length) | 0],
             cap,
             // 0 short, 1 long, 2 shaved, 3 bun / topknot
@@ -2592,7 +2783,8 @@ export class BikeGame {
             armsRoll: rand(), // compared against a live threshold so the whole stand can "cheer" together
             phone: depth > 0.2 && rand() < 0.05,
             flag: depth > 0.62 && rand() < 0.022 ? pick(FLAGS) : null,
-            sign: depth > 0.6 && rand() < 0.02 ? pick([['#F4F7FB', 3], ['#2EE59D', 2], ['#FFD23F', 2]]) : null,
+            sign: depth > 0.6 && rand() < 0.011 ? pick([['#F4F7FB', 3], ['#2EE59D', 2], ['#FFD23F', 2], ['#FF5C7A', 1]]) : null,
+            signText: pick([['SEND IT!', 3], ['GO 42!', 2], ['FLY!', 2], ['8× !!', 2], ['BIKE IT', 2], ['HIGHER!', 1]]),
             finger: depth > 0.55 && rand() < 0.025,
             scarf: depth > 0.62 && rand() < 0.06 ? pick(SCARVES) : null,
           });
@@ -2658,7 +2850,7 @@ export class BikeGame {
   // flights without the stand ever running out. `par` is the raw drift;
   // `shift` is that drift wrapped into [0, W).
   standGeom(W, H, gY) {
-    const standTop = H * 0.33;
+    const standTop = this.tallSky ? Math.max(H * 0.33, gY - Math.min(H * 0.39, W * 0.6)) : H * 0.33;
     const hoardH = Math.max(14, H * 0.034);
     const lowerBottom = gY - hoardH;
     const bandH = Math.max(10, H * 0.026);
@@ -2668,10 +2860,13 @@ export class BikeGame {
     // spacing (not to the screen's width): a small stand gets fewer rows of
     // fans big enough to read, a big one the full house
     const upH = bandTop - standTop, loH = lowerBottom - (bandTop + bandH);
+    // Fans stand taller than the spacing between rows, so each row's heads
+    // come up over the shoulders of the row behind — a packed house, not
+    // people lined up on shelves
     const lowerRows = Math.max(4, Math.min(9, Math.floor(loH / 16.5)));
-    const sizeScale = Math.min(1.5, Math.max(0.55, loH / lowerRows / 18.2));
+    const sizeScale = Math.min(1.7, Math.max(0.6, loH / lowerRows / 13.5));
     // The upper tier's smaller fans pack tighter, so it fits more rows
-    const upperRows = Math.max(3, Math.min(7, Math.floor(upH / (8 * sizeScale))));
+    const upperRows = Math.max(3, Math.min(8, Math.floor(upH / (6.2 * sizeScale))));
     return {
       W, H, gY, par, shift: ((par % W) + W) % W,
       standTop, roofH: H * 0.026, trussH: H * 0.02, hoardH,
@@ -2740,7 +2935,7 @@ export class BikeGame {
         }
 
         if (row.deck === 'upper') this.paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance);
-        else this.paintNearFans(ctx, g, row, y, size, ts, size >= 6.5 && !this.lowPower ? null : waveX, armsUpChance);
+        else this.paintNearFans(ctx, g, row, y, size, ts, this.liveWaveRow(row, g) ? null : waveX, armsUpChance);
 
         ctx.fillStyle = row.deck === 'upper' ? '#08111F' : '#0B1628';
         ctx.fillRect(0, stepY, W, deckBottom - stepY);
@@ -2757,6 +2952,21 @@ export class BikeGame {
     const loHaze = ctx.createLinearGradient(0, lowerTop, 0, lowerBottom);
     loHaze.addColorStop(0, 'rgba(4,7,15,0.36)'); loHaze.addColorStop(1, 'rgba(4,7,15,0.04)');
     ctx.fillStyle = loHaze; ctx.fillRect(0, lowerTop, W, lowerBottom - lowerTop);
+
+    // Pools of floodlight on the crowd below each light mast
+    const pool = this.warmPoolSprite();
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    [0.1, 0.32, 0.68, 0.9].forEach((f) => {
+      [[lowerTop + (lowerBottom - lowerTop) * 0.42, (lowerBottom - lowerTop) * 0.7, 0.12], [standTop + (bandTop - standTop) * 0.55, (bandTop - standTop) * 0.85, 0.07]].forEach(([cy, r, a]) => {
+        ctx.globalAlpha = a;
+        [xAt(f) - W, xAt(f), xAt(f) + W].forEach((cx) => {
+          if (cx < -r * 1.7 || cx > W + r * 1.7) return;
+          ctx.drawImage(pool, cx - r * 1.7, cy - r, r * 3.4, r * 2);
+        });
+        ctx.globalAlpha = 1;
+      });
+    });
+    ctx.restore();
 
     this.aisleFracs.forEach((f) => this.paintAisle(ctx, g, xAt(f)));
 
@@ -2777,19 +2987,25 @@ export class BikeGame {
     // Roof: truss, fascia, LED trim and the downlights washing the upper tier.
     const roofTop = standTop - roofH, trussTop = roofTop - trussH;
     const bays = Math.max(1, Math.round(W / Math.max(14, trussH * 1.7))), step = W / bays;
-    ctx.strokeStyle = 'rgba(40,58,90,0.95)'; ctx.lineWidth = 1.3;
+    ctx.strokeStyle = 'rgba(40,58,90,0.95)'; ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, trussTop); ctx.lineTo(W, trussTop);
     for (let b = 0; b < bays; b++) {
       const xx = b * step;
       ctx.moveTo(xx, roofTop); ctx.lineTo(xx + step / 2, trussTop); ctx.lineTo(xx + step, roofTop);
+      ctx.moveTo(xx, roofTop); ctx.lineTo(xx, trussTop);
     }
     ctx.stroke();
+    ctx.strokeStyle = 'rgba(52,74,112,1)'; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.moveTo(0, trussTop); ctx.lineTo(W, trussTop); ctx.stroke();
+    ctx.fillStyle = 'rgba(170,200,240,0.35)'; ctx.fillRect(0, trussTop - 1, W, 0.8);
 
     const fascia = ctx.createLinearGradient(0, roofTop, 0, standTop);
-    fascia.addColorStop(0, '#18253D'); fascia.addColorStop(1, '#0A111F');
+    fascia.addColorStop(0, '#1C2B46'); fascia.addColorStop(0.5, '#121D33'); fascia.addColorStop(1, '#0A111F');
     ctx.fillStyle = fascia; ctx.fillRect(0, roofTop, W, roofH);
-    ctx.fillStyle = 'rgba(255,255,255,0.09)'; ctx.fillRect(0, roofTop, W, 1);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fillRect(0, roofTop, W, 1);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    const panels = Math.max(1, Math.round(W / 60));
+    for (let i = 0; i < panels; i++) ctx.fillRect(i * (W / panels), roofTop + 1, 1, roofH - 1);
 
     ctx.fillStyle = '#2EE59D'; ctx.fillRect(0, standTop - 1.5, W, 1.5);
     const trim = ctx.createLinearGradient(0, standTop, 0, standTop + 16);
@@ -2798,17 +3014,32 @@ export class BikeGame {
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const lamps = 10, gap = W / lamps;
+    const lamps = 16, gap = W / lamps, wash = this.warmPoolSprite();
     for (let i = 0; i < lamps; i++) {
       const lx = gap * (i + 0.5);
-      const pool = ctx.createRadialGradient(lx, standTop, 0, lx, standTop, gap * 0.75);
-      pool.addColorStop(0, 'rgba(255,236,200,0.11)'); pool.addColorStop(1, 'rgba(255,236,200,0)');
-      ctx.fillStyle = pool;
-      ctx.fillRect(lx - gap * 0.75, standTop, gap * 1.5, gap * 0.75);
-      ctx.fillStyle = 'rgba(255,246,222,0.9)';
-      ctx.fillRect(lx - 3, standTop - 3, 6, 2);
+      ctx.globalAlpha = 0.12;
+      ctx.drawImage(wash, 0, 32, 64, 32, lx - gap * 0.9, standTop, gap * 1.8, gap * 0.9);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(255,246,222,0.25)';
+      ctx.fillRect(lx - 5, standTop - 4, 10, 4);
+      ctx.fillStyle = 'rgba(255,246,222,0.95)';
+      ctx.fillRect(lx - 3, standTop - 3.2, 6, 2.2);
     }
     ctx.restore();
+  }
+
+  // A soft round pool of warm floodlight, baked once and stretched into
+  // place wherever the stand is lit.
+  warmPoolSprite() {
+    if (!this._warmPool) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, 'rgba(255,240,214,1)'); gr.addColorStop(1, 'rgba(255,240,214,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+      this._warmPool = c;
+    }
+    return this._warmPool;
   }
 
   // A fan right at the tile edge is also drawn at x ± W so it isn't sliced
@@ -2829,6 +3060,10 @@ export class BikeGame {
     d -= Math.round(d);
     return Math.exp(-(d * d) / 0.0008);
   }
+  // The front few rows of the lower bowl, big enough to show it, ride the
+  // wave live every frame (drawWaveFans); every other row carries it in the
+  // cached stand.
+  liveWaveRow(row, g) { return row.deck === 'lower' && row.depth >= 0.72 && row.size * g.sizeScale >= 6.5 && !this.lowPower; }
   // Rows further back run slightly behind, so the wave's front leans.
   waveLag(row) { return (1 - row.depth) * 0.016; }
 
@@ -2842,7 +3077,7 @@ export class BikeGame {
     const ctx = this.ctx, waveX = (ts * 0.00008) % 1;
     const rows = [];
     this.crowdRows.forEach((row) => {
-      if (row.deck !== 'lower' || row.size * g.sizeScale < 6.5) return;
+      if (!this.liveWaveRow(row, g)) return;
       const lag = this.waveLag(row);
       const seats = row.seats.filter((s) => this.waveRise(s.xFrac, waveX, lag) > 0.1);
       if (seats.length) rows.push({ row: { ...row, seats }, y: this.crowdRowY(g, row), size: row.size * g.sizeScale });
@@ -2881,17 +3116,28 @@ export class BikeGame {
         const b = into(bodies, s.shirt);
         b.push(x - w / 2, yy - size * 0.1, w, size * 1.3);
         if (armsUp) b.push(x - w * 0.75, yy - size * 0.95, size * 0.28, size * 0.9, x + w * 0.75 - size * 0.28, yy - size * 0.95, size * 0.28, size * 0.9);
-        into(heads, s.skin).push(x - head / 2, yy - size * 0.92, head, head);
-        into(hair, s.cap || s.hair).push(x - head / 2, yy - size * 0.98, head, head * 0.38);
+        into(heads, s.skin).push(x, yy - size * 0.5);
+        into(hair, s.cap || s.hair).push(x, yy - size * 0.56);
         if (phoneOn) lights.push(x + size * 0.5, yy - size * 1.2);
       });
     });
-    ctx.globalAlpha = row.deck === 'upper' ? 0.88 : 1;
-    [bodies, heads, hair].forEach((layer) => layer.forEach((r, color) => {
+    ctx.globalAlpha = row.deck === 'upper' ? 0.9 : 1;
+    bodies.forEach((r, color) => {
       ctx.fillStyle = color; ctx.beginPath();
       for (let i = 0; i < r.length; i += 4) ctx.rect(r[i], r[i + 1], r[i + 2], r[i + 3]);
       ctx.fill();
-    }));
+    });
+    const hr = head / 2;
+    heads.forEach((p, color) => {
+      ctx.fillStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] + hr, p[i + 1]); ctx.arc(p[i], p[i + 1], hr, 0, Math.PI * 2); }
+      ctx.fill();
+    });
+    hair.forEach((p, color) => {
+      ctx.fillStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] - hr * 1.02, p[i + 1]); ctx.arc(p[i], p[i + 1], hr * 1.02, Math.PI, 0); ctx.closePath(); }
+      ctx.fill();
+    });
     for (let i = 0; i < lights.length; i += 2) this.paintPhoneLight(ctx, lights[i], lights[i + 1], size);
     ctx.globalAlpha = 1;
   }
@@ -3025,9 +3271,12 @@ export class BikeGame {
         // A hand-made sign held overhead
         const sw = size * 3.4, sh = size * 1.9, sx = x - sw / 2, sy = yy - size * 3.1;
         ctx.fillStyle = s.sign; ctx.fillRect(sx, sy, sw, sh);
-        ctx.fillStyle = s.sign === '#F4F7FB' ? '#14223F' : '#0A1222';
-        ctx.fillRect(sx + sw * 0.14, sy + sh * 0.28, sw * 0.72, sh * 0.16);
-        ctx.fillRect(sx + sw * 0.24, sy + sh * 0.58, sw * 0.52, sh * 0.14);
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = Math.max(0.6, size * 0.08); ctx.strokeRect(sx, sy, sw, sh);
+        ctx.fillStyle = s.sign === '#F4F7FB' ? '#E8323C' : '#0A1222';
+        ctx.font = `italic 800 ${sh * 0.56}px ${FONT_NUM}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const tw = ctx.measureText(s.signText).width, k = Math.min(1, (sw * 0.88) / (tw || 1));
+        ctx.save(); ctx.translate(x, sy + sh * 0.53); ctx.scale(k, 1); ctx.fillText(s.signText, 0, 0); ctx.restore();
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
       } else if (s.finger) {
         // Foam finger on one raised hand
         const fx = x + size * 0.82, fy = yy - size * 1.2;
@@ -3126,7 +3375,7 @@ export class BikeGame {
       stage = 0;
       [this._crowdCanvas, this._crowdBack] = [this._crowdBack, this._crowdCanvas];
       [this._crowdCtx, this._crowdBackCtx] = [this._crowdBackCtx, this._crowdCtx];
-      this._crowdTimer = setTimeout(step, this.crowdMs);
+      this._crowdTimer = setTimeout(step, this.crowdMs * (this.lowPower ? 2.5 : 1));
     };
     this._crowdTimer = setTimeout(step, this.crowdMs);
   }
@@ -3420,7 +3669,9 @@ export class BikeGame {
       const rnd = (k) => { const v = Math.sin((this.roundNum * 3.1 + s * 17 + k) * 12.9898) * 43758.5453; return v - Math.floor(v); };
       const age = t - (3 + s * 12);
       if (age < 0) continue;
-      const cx = W * (0.14 + rnd(1) * 0.72), cy = H * (0.07 + rnd(2) * 0.13);
+      const cx = W * (0.14 + rnd(1) * 0.72), Rmax = H * (0.09 + rnd(5) * 0.04) + 6, z = this.clearZone;
+      let cy = H * (0.07 + rnd(2) * 0.13);
+      if (z && cx + Rmax > z.left && cx - Rmax < z.right) cy = Math.max(cy, z.bottom + Rmax);
       if (age < 9) {
         const p = age / 9, y = standTop - (standTop - cy) * (1 - (1 - p) * (1 - p));
         ctx.strokeStyle = 'rgba(255,224,170,0.85)'; ctx.lineWidth = 1.6;
@@ -3474,6 +3725,7 @@ export class BikeGame {
     if (g.shift > 0.5) ctx.drawImage(this._crowdCanvas, W - g.shift, ct, W, ch);
     this.drawWaveFans(g, ts);
     this.drawWaveGlow(g, ts);
+    this.drawRoofFlags(g, ts);
 
     // Cheer flash — a brief warm wash over the crowd right after an accurate landing
     if (this.cheer > 0.02) {
@@ -3498,6 +3750,25 @@ export class BikeGame {
     const sh = ctx.createLinearGradient(0, gY, 0, gY + 10);
     sh.addColorStop(0, 'rgba(0,0,0,0.35)'); sh.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = sh; ctx.fillRect(0, gY, W, 10);
+  }
+
+  // Team flags flying from poles along the top of the roof, each rippling
+  // in the wind on its own beat.
+  drawRoofFlags(g, ts) {
+    const ctx = this.ctx, base = g.standTop - g.roofH - g.trussH, ph = Math.max(14, g.H * 0.045);
+    const fw = ph * 0.78, fh = ph * 0.44, COLORS = ['#2EE59D', '#E8EEF6', '#1E3A66', '#FFD23F', '#2EE59D', '#E8EEF6'];
+    [0.03, 0.21, 0.26, 0.74, 0.79, 0.97].forEach((f, i) => this.wrapXs(g, f, fw * 1.5).forEach((px) => {
+      ctx.strokeStyle = '#9AA8BE'; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(px, base); ctx.lineTo(px, base - ph); ctx.stroke();
+      const top = base - ph + 1.5, wave = (k) => Math.sin(ts * 0.006 + i * 1.3 - k * 1.1) * fh * 0.16 * (k / 6);
+      const edge = (y0, dip) => { for (let k = 0; k <= 6; k++) ctx.lineTo(px + (fw * k) / 6, top + y0 + wave(k) - (k / 6) * fh * dip); };
+      const back = (y0, dip) => { for (let k = 6; k >= 0; k--) ctx.lineTo(px + (fw * k) / 6, top + y0 + wave(k) - (k / 6) * fh * dip); };
+      ctx.beginPath(); ctx.moveTo(px, top); edge(0, 0); back(fh, 0.12); ctx.closePath();
+      ctx.fillStyle = COLORS[i]; ctx.fill();
+      ctx.beginPath(); ctx.moveTo(px, top + fh * 0.62); edge(fh * 0.62, 0.08); back(fh, 0.12); ctx.closePath();
+      ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.fill();
+      ctx.fillStyle = '#DCE4F0'; ctx.beginPath(); ctx.arc(px, base - ph, 1.4, 0, Math.PI * 2); ctx.fill();
+    }));
   }
 
   // Branded scoreboard screen straddling the roofline
@@ -3840,9 +4111,9 @@ export class BikeGame {
   // (and bigger) the closer it is to the camera.
   wreckPlacement(it, H, r) {
     const wx = it.d >= 0 ? r.P2.x + this.mToPx(it.d, r) : r.rx + it.d;
-    const pitTop = r.gY + H * TRACK_FRAC;
+    const pitTop = r.gY + this.trackHeight(this.cw, H);
     const y = pitTop + (H - pitTop) * it.depthT + BikeGame._wreckGroundBump(wx) * (0.6 + it.depthT);
-    return { wx, y, scale: it.scale * (0.85 + it.depthT * 0.45) * 1.45 };
+    return { wx, y, scale: it.scale * (0.85 + it.depthT * 0.45) * 1.75 };
   }
 
   // Every wreck item's screen position is `worldX - camX` — a pure 1:1
@@ -3868,7 +4139,7 @@ export class BikeGame {
     if (!isFinite(minX)) { minX = 0; maxX = 0; }
     const margin = 120;
     const x0 = minX - margin, x1 = maxX + margin;
-    const y0 = r.gY - 60, y1 = H;
+    const y0 = r.gY - 110, y1 = H;
     const cw = Math.max(1, Math.ceil(x1 - x0)), ch = Math.max(1, Math.ceil(y1 - y0));
 
     const canvas = document.createElement('canvas');
@@ -3897,15 +4168,37 @@ export class BikeGame {
     // Whole layer scaled into CSS px (its backing store is DPR-sized)
     ctx.drawImage(this._wreckCanvas, this._wreckX0 - this.camX, this._wreckY0, this._wreckCW, this._wreckCH);
 
-    // Live smoke overlay for the (few) smoking 'brokenBiker' wrecks — the
-    // only part of the wreckage field that actually animates over time.
+    // Live overlays for the parts of the field that animate: smoke off the
+    // wrecked bikes, and the fires burning in the oil drums.
     this.wreckItems.forEach((it, i) => {
-      if (it.kind !== 'brokenBiker') return;
+      if (it.kind !== 'brokenBiker' && it.kind !== 'barrel') return;
       const { wx, y, scale } = this.wreckPlacement(it, H, r);
       const sx = wx - this.camX + it.lat;
       if (sx < -90 || sx > W + 90) return;
-      this.drawWreckSmoke(sx + 8 * it.flip, y - 12 * scale, i + it.phase, ts);
+      if (it.kind === 'brokenBiker') this.drawWreckSmoke(sx + 8 * it.flip, y - 12 * scale, i + it.phase, ts);
+      else this.drawBarrelFire(sx + Math.sin(it.rot * 0.15) * 16.5 * scale, y - Math.cos(it.rot * 0.15) * 16.5 * scale, y, scale, ts, i);
     });
+  }
+
+  // The fire in an oil drum whose rim is at (x, y), standing on the ground
+  // at `groundY`: a warm pool of light flickering on the dirt round it, a
+  // glow, the flames themselves and a few sparks drifting up.
+  drawBarrelFire(x, y, groundY, scale, ts, seed) {
+    const ctx = this.ctx, { fire } = this.fireSprites();
+    const flick = 0.85 + 0.15 * Math.sin(ts * 0.023 + seed * 3) * Math.sin(ts * 0.011 + seed);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.22 * flick;
+    ctx.drawImage(fire[4], x - 46 * scale, groundY - 10 * scale, 92 * scale, 20 * scale);
+    ctx.globalAlpha = 0.3 * flick;
+    const gr = 26 * scale; ctx.drawImage(fire[3], x - gr, y - 6 * scale - gr, gr * 2, gr * 2);
+    ctx.restore();
+    this.drawFireSpot(x, y + 1.5 * scale, 15 * scale * flick, ts, seed);
+    for (let k = 0; k < 4; k++) {
+      const t = ((ts * 0.0006 + k * 0.27 + seed * 0.13) % 1);
+      const px = x + Math.sin(t * 9 + k * 2 + seed) * 5 * scale, py = y - (8 + t * 34) * scale;
+      ctx.fillStyle = `rgba(255,${180 - Math.round(t * 90)},70,${(1 - t) * 0.9})`;
+      ctx.beginPath(); ctx.arc(px, py, Math.max(0.6, 0.9 * scale * (1 - t * 0.5)), 0, Math.PI * 2); ctx.fill();
+    }
   }
 
   // A long bone: a tapered shaft between two bulbous, gradient-shaded ends
@@ -4117,18 +4410,20 @@ export class BikeGame {
     // flat in the sand instead of looking propped on a slope.
     if (kind === 'humanSkeleton') scale *= 0.58;
     else if (kind === 'dinoBones') rot *= 0.25;
+    else if (UPRIGHT_PROPS.has(kind)) { rot *= 0.15; if (kind === 'cactus' || kind === 'deadTree') scale *= 0.85; }
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(rot);
     ctx.scale(scale * flip, scale);
 
-    if (kind !== 'dinoBones' && kind !== 'humanSkeleton' && kind !== 'rocks') {
-      const shadowR = kind === 'brokenBiker' ? 26 : kind === 'cowSkull' ? 16 : kind === 'tireLean' ? 13 : kind === 'graveCross' ? 10 : 12;
+    if (kind !== 'dinoBones' && kind !== 'humanSkeleton' && kind !== 'rocks' && kind !== 'tumbleweed' && (kind === 'hayBales' || !UPRIGHT_PROPS.has(kind))) {
+      const shadowR = kind === 'brokenBiker' ? 26 : kind === 'hayBales' ? 18 : kind === 'cowSkull' ? 16 : kind === 'tireFlat' ? 14 : kind === 'tireLean' ? 13 : kind === 'graveCross' ? 10 : 12;
       ctx.fillStyle = 'rgba(0,0,0,0.32)';
       ctx.beginPath(); ctx.ellipse(0, 2, shadowR, shadowR * 0.3, 0, 0, Math.PI * 2); ctx.fill();
     }
 
-    if (kind === 'tireLean' || kind === 'tireFlat') this.drawPropTyre(kind === 'tireFlat');
+    if (kind === 'tireLean') this.drawPropTyre(false);
+    else if (kind === 'tireFlat') this.drawPropTyreFlat();
     else if (kind === 'skull') this.drawPropSkullAndBones();
     else if (kind === 'bone') this.drawPropBonePile();
     else if (kind === 'helmet') this.drawPropHelmet();
@@ -4138,6 +4433,12 @@ export class BikeGame {
     else if (kind === 'cowSkull') this.drawPropCowSkull();
     else if (kind === 'graveCross') this.drawPropGraveCross();
     else if (kind === 'rocks') this.drawPropRocks();
+    else if (kind === 'barrel') this.drawPropBarrel();
+    else if (kind === 'hayBales') this.drawPropHayBales();
+    else if (kind === 'cactus') this.drawPropCactus();
+    else if (kind === 'deadTree') this.drawPropDeadTree();
+    else if (kind === 'warningSign') this.drawPropWarningSign();
+    else if (kind === 'tumbleweed') this.drawTumbleweed(0, -9, 9, phase);
 
     ctx.restore();
     if (kind === 'brokenBiker' && !skipSmoke) this.drawWreckSmoke(x + 8 * flip, y - 12 * scale, seed + phase, ts);
@@ -4286,7 +4587,7 @@ export class BikeGame {
   // shattered, with the snapped-off peak lying beside it.
   drawPropHelmet() {
     const ctx = this.ctx;
-    ctx.save(); ctx.translate(0, -6); ctx.rotate(0.35); ctx.scale(1.15, 1.15);
+    ctx.save(); ctx.translate(0, -7); ctx.rotate(0.35); ctx.scale(1.35, 1.35);
     const helmet = () => {
       ctx.beginPath();
       ctx.moveTo(-4.8, 1.5);
@@ -4329,6 +4630,7 @@ export class BikeGame {
     ctx.beginPath(); ctx.moveTo(-5, -1); ctx.lineTo(5, -1.6); ctx.lineTo(4.2, 0.4); ctx.lineTo(-3.2, 0.6); ctx.closePath(); ctx.fill();
     ctx.strokeStyle = 'rgba(4,8,16,0.85)'; ctx.lineWidth = 0.6; ctx.stroke();
     ctx.restore();
+    this.drawSandDrift(-5, 1, 6, 1.8);
   }
 
   // A crashed MX bike in the rider's colours, nose-down with the front wheel
@@ -4949,37 +5251,415 @@ export class BikeGame {
     ctx.fillStyle = '#1B1F27'; ctx.beginPath(); ctx.roundRect(1.9, -3.3, 4.7, 3, 1.2); ctx.fill();
     ctx.fillStyle = '#FF9A2E'; ctx.beginPath(); ctx.roundRect(2.5, -2.8, 3.8, 2, 0.8); ctx.fill();
     ctx.restore();
+    // A little plate nailed to the upright under the crossbar
+    ctx.fillStyle = '#9AA0A8'; ctx.beginPath(); ctx.roundRect(-2.6, -19.6, 5.2, 3, 0.5); ctx.fill();
+    ctx.strokeStyle = 'rgba(20,12,6,0.7)'; ctx.lineWidth = 0.35; ctx.stroke();
+    ctx.fillStyle = '#2A2E36'; ctx.font = `800 2.4px ${FONT_NUM}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('R.I.P', 0, -18.05); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
     ctx.restore();
     this.drawSandDrift(0, 1.5, 9, 3.2);
+    // Dried flowers left at its foot, and a ring of stones round the mound
+    ctx.lineCap = 'round';
+    [[-1.4, -0.4, -0.5, '#8A2A2A'], [-0.4, 0, -0.15, '#B8862E'], [0.8, -0.2, 0.3, '#7A2438']].forEach(([fx, fy, lean, c]) => {
+      const tx = fx + Math.sin(lean) * 6, ty = fy - Math.cos(lean) * 6;
+      ctx.strokeStyle = '#5E5A30'; ctx.lineWidth = 0.35; ctx.beginPath(); ctx.moveTo(fx + 2.6, fy + 0.6); ctx.quadraticCurveTo(fx + 2.6, ty + 2, tx + 2.6, ty); ctx.stroke();
+      ctx.fillStyle = c; ctx.beginPath(); ctx.arc(tx + 2.6, ty, 0.9, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.lineCap = 'butt';
+    [[-8.6, 1.2, 1.5], [-5.6, 2.6, 1.3], [-2, 3.3, 1.4], [2.2, 3.3, 1.2], [5.8, 2.6, 1.4], [8.6, 1.2, 1.2]].forEach(([sx, sy, sr]) => {
+      const g = ctx.createRadialGradient(sx - sr * 0.4, sy - sr * 0.5, 0.1, sx, sy, sr);
+      g.addColorStop(0, '#B4AA9C'); g.addColorStop(1, '#5A524A');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(sx, sy, sr, sr * 0.72, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(20,14,8,0.55)'; ctx.lineWidth = 0.35; ctx.stroke();
+    });
   }
 
-  // A pair of desert boulders with a dry tuft of grass between them.
+  // Three desert boulders, cut into flat facets the way weathered stone
+  // breaks — a pale top lit by the floodlights, a mid-tone face and a dark
+  // side — cracked, spotted with lichen, with a dry tuft of grass between
+  // them.
   drawPropRocks() {
     const ctx = this.ctx;
-    const boulder = (x, y, w, h, flip) => {
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.beginPath(); ctx.ellipse(x + w * 0.2, y + 0.6, w * 1.1, h * 0.28, 0, 0, Math.PI * 2); ctx.fill();
-      const g = ctx.createLinearGradient(x - w, y - h * 2, x + w * 0.8, y);
-      g.addColorStop(0, '#A8957A'); g.addColorStop(0.5, '#73624C'); g.addColorStop(1, '#3A3024');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(x - w, y);
-      ctx.bezierCurveTo(x - w * 1.05, y - h * 1.2, x - w * 0.3 * flip, y - h * 2.1, x + w * 0.25, y - h * 1.9);
-      ctx.bezierCurveTo(x + w * 0.95, y - h * 1.6, x + w * 1.05, y - h * 0.5, x + w, y);
-      ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = 'rgba(30,22,14,0.6)'; ctx.lineWidth = 0.6; ctx.stroke();
-      ctx.strokeStyle = 'rgba(30,22,14,0.4)'; ctx.lineWidth = 0.45;
-      ctx.beginPath(); ctx.moveTo(x - w * 0.1, y - h * 1.7); ctx.lineTo(x + w * 0.15, y - h * 1.1); ctx.lineTo(x - w * 0.05, y - h * 0.6); ctx.stroke();
-      ctx.fillStyle = 'rgba(255,238,206,0.2)';
-      ctx.beginPath(); ctx.ellipse(x - w * 0.3, y - h * 1.5, w * 0.4, h * 0.3, -0.4, 0, Math.PI * 2); ctx.fill();
+    const rock = (x, y, s, flip, seed) => {
+      ctx.fillStyle = 'rgba(0,0,0,0.32)';
+      ctx.beginPath(); ctx.ellipse(x + s * 0.25 * flip, y + 0.4, s * 1.25, s * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+      const P = [[-1, 0], [-0.98, -0.5], [-0.62, -1.02], [0.06, -1.18], [0.72, -0.9], [1.02, -0.36], [0.94, 0]]
+        .map(([px, py], i) => [x + px * s * flip, y + py * s * (0.86 + ((seed + i) % 3) * 0.05)]);
+      const R = [x - 0.12 * s * flip, y - 0.58 * s], B = [x - 0.18 * s * flip, y];
+      const face = (pts, fill) => {
+        ctx.beginPath(); ctx.moveTo(...pts[0]); for (let i = 1; i < pts.length; i++) ctx.lineTo(...pts[i]); ctx.closePath();
+        ctx.fillStyle = fill; ctx.fill();
+      };
+      const top = ctx.createLinearGradient(x, y - s * 1.2, x, y - s * 0.5);
+      top.addColorStop(0, '#C4B092'); top.addColorStop(1, '#988468');
+      face([P[1], P[2], P[3], P[4], R], top);
+      face([P[0], P[1], R, B], flip > 0 ? '#7C6A53' : '#4C3F31');
+      face([R, P[4], P[5], P[6], B], flip > 0 ? '#4C3F31' : '#7C6A53');
+      ctx.beginPath(); ctx.moveTo(...P[0]); for (let i = 1; i < P.length; i++) ctx.lineTo(...P[i]); ctx.closePath();
+      ctx.strokeStyle = 'rgba(26,18,10,0.7)'; ctx.lineWidth = 0.6; ctx.lineJoin = 'round'; ctx.stroke();
+      ctx.strokeStyle = 'rgba(26,18,10,0.35)'; ctx.lineWidth = 0.4;
+      ctx.beginPath(); ctx.moveTo(...R); ctx.lineTo(...B); ctx.moveTo(...P[1]); ctx.lineTo(...R); ctx.lineTo(...P[4]);
+      ctx.moveTo(x + 0.3 * s * flip, y - 0.75 * s); ctx.lineTo(x + 0.45 * s * flip, y - 0.45 * s); ctx.lineTo(x + 0.38 * s * flip, y - 0.2 * s);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,240,210,0.35)'; ctx.lineWidth = 0.45;
+      ctx.beginPath(); ctx.moveTo(...P[1]); ctx.lineTo(...P[2]); ctx.lineTo(...P[3]); ctx.stroke();
+      [[-0.4, -0.75, 0.11, '#9DA86A'], [-0.25, -0.88, 0.07, '#C79A4A'], [0.2, -0.95, 0.09, '#9DA86A'], [-0.6, -0.4, 0.07, '#B8B48A']].forEach(([lx, ly, lr, c]) => {
+        ctx.fillStyle = c; ctx.globalAlpha = 0.7;
+        ctx.beginPath(); ctx.arc(x + lx * s * flip, y + ly * s, lr * s, 0, Math.PI * 2); ctx.fill();
+      });
+      ctx.globalAlpha = 1;
     };
-    boulder(-5, 1, 8, 4.4, 1);
-    ctx.strokeStyle = '#A99257'; ctx.lineWidth = 0.6; ctx.lineCap = 'round';
-    ctx.beginPath();
-    for (let k = -3; k <= 3; k++) { ctx.moveTo(3 + k * 0.5, 1.4); ctx.quadraticCurveTo(3 + k * 1.1, -2, 3 + k * 1.9, -4.5 + Math.abs(k) * 0.6); }
+    rock(-5, 1, 8.5, 1, 0);
+    this.drawGrassTuft(3.4, 1.4, 6, 1);
+    rock(7.5, 2, 5.4, -1, 1);
+    rock(1.5, 3, 2.6, 1, 2);
+    this.drawSandDrift(0, 2.6, 12, 2.2);
+  }
+
+  // A dry tuft of desert grass: blades fanning up and bending over, straw
+  // to olive, darker at the root.
+  drawGrassTuft(x, y, h, seed) {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round';
+    for (let k = -4; k <= 4; k++) {
+      const lean = k * 0.32 + Math.sin(seed * 3 + k) * 0.15, L = h * (1 - Math.abs(k) * 0.08);
+      ctx.strokeStyle = k % 3 === 0 ? '#8C8A48' : k % 2 ? '#C2A35E' : '#A8904E'; ctx.lineWidth = 0.55;
+      ctx.beginPath(); ctx.moveTo(x + k * 0.3, y);
+      ctx.quadraticCurveTo(x + k * 0.3 + lean * L * 0.4, y - L * 0.75, x + k * 0.3 + lean * L * 0.9, y - L * (0.85 - Math.abs(lean) * 0.25));
+      ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+  }
+
+  // A lying tyre seen from just above: the knobby tread band round its
+  // front, the side wall with its moulded ring catching the light, a
+  // buckled gold rim with snapped spokes, sand blown into the hole and
+  // drifted over the back of it.
+  drawPropTyreFlat() {
+    const ctx = this.ctx, R = 12.5, ry = 4.4, top = -3.6;
+    ctx.fillStyle = '#0A0B0E';
+    ctx.beginPath(); ctx.ellipse(0, top, R, ry, 0, 0, Math.PI); ctx.ellipse(0, 0, R, ry, 0, Math.PI, 0, true); ctx.closePath(); ctx.fill();
+    ctx.save(); ctx.beginPath(); ctx.ellipse(0, top, R, ry, 0, 0, Math.PI); ctx.ellipse(0, 0, R, ry, 0, Math.PI, 0, true); ctx.closePath(); ctx.clip();
+    ctx.fillStyle = '#20232A';
+    for (let k = 0; k < 18; k++) {
+      const a = Math.PI * (k + 0.5) / 18, px = Math.cos(a) * R, w = Math.sin(a) * 1.3;
+      ctx.fillRect(px - w / 2, top + Math.sin(a) * ry - 0.2, w, 3.2);
+    }
+    ctx.restore();
+    const rubber = ctx.createLinearGradient(0, top - ry, 0, top + ry);
+    rubber.addColorStop(0, '#3A3E47'); rubber.addColorStop(0.6, '#1E2128'); rubber.addColorStop(1, '#101217');
+    ctx.fillStyle = rubber; ctx.beginPath(); ctx.ellipse(0, top, R, ry, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 0.7; ctx.setLineDash([2.2, 1.6]);
+    ctx.beginPath(); ctx.ellipse(0, top, R * 0.83, ry * 0.83, 0, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#5A3E22'; ctx.beginPath(); ctx.ellipse(0, top + 0.3, R * 0.62, ry * 0.6, 0, 0, Math.PI * 2); ctx.fill();
+    const sand = ctx.createRadialGradient(-1, top + 0.8, 0.5, 0, top + 0.6, R * 0.6);
+    sand.addColorStop(0, '#A27A4C'); sand.addColorStop(1, '#5A3E22');
+    ctx.fillStyle = sand; ctx.beginPath(); ctx.ellipse(0.5, top + 0.9, R * 0.5, ry * 0.42, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(210,214,222,0.75)'; ctx.lineWidth = 0.4; ctx.beginPath();
+    for (let s = 0; s < 10; s++) {
+      if (s % 4 === 1) continue;
+      const a = (s / 10) * Math.PI * 2, k = s % 3 === 2 ? 0.55 : 1;
+      ctx.moveTo(Math.cos(a) * 1.4, top + 0.6 + Math.sin(a) * 0.5); ctx.lineTo(Math.cos(a) * R * 0.6 * k, top + Math.sin(a) * ry * 0.6 * k);
+    }
+    ctx.stroke();
+    ctx.strokeStyle = '#C99A2E'; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.ellipse(0, top, R * 0.64, ry * 0.64, 0.04, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,240,190,0.6)'; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.ellipse(0, top, R * 0.64, ry * 0.64, 0.04, Math.PI * 1.1, Math.PI * 1.6); ctx.stroke();
+    ctx.fillStyle = '#8C9098'; ctx.beginPath(); ctx.ellipse(0, top + 0.6, 1.6, 0.7, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 0.5; ctx.beginPath(); ctx.ellipse(0, top, R, ry, 0, 0, Math.PI * 2); ctx.stroke();
+    this.drawSandDrift(-7, -0.6, 7, 2.4);
+  }
+
+  // A rusted oil drum standing in the dirt with a fire going inside it (the
+  // flames and their glow are drawn live — see drawWrecks): the barrel
+  // shaded round its curve, two rolled hoops, a faded hazard band, rust
+  // bleeding down from the rim and a dent, a scorched plank leaning on it
+  // and ash and embers spilled round its foot.
+  drawPropBarrel() {
+    const ctx = this.ctx, INK = 'rgba(14,6,2,0.85)';
+    ctx.fillStyle = 'rgba(30,22,18,0.55)'; ctx.beginPath(); ctx.ellipse(1, 1, 11, 2.6, 0, 0, Math.PI * 2); ctx.fill();
+    const body = () => {
+      ctx.beginPath(); ctx.moveTo(-6, -16.5); ctx.quadraticCurveTo(-6.7, -8.2, -6, -0.4);
+      ctx.ellipse(0, -0.4, 6, 2, 0, Math.PI, 0, true); ctx.quadraticCurveTo(6.7, -8.2, 6, -16.5); ctx.closePath();
+    };
+    const g = ctx.createLinearGradient(-6.5, 0, 6.5, 0);
+    g.addColorStop(0, '#4A2010'); g.addColorStop(0.28, '#A9542C'); g.addColorStop(0.5, '#8A3E20'); g.addColorStop(1, '#2A1008');
+    body(); ctx.fillStyle = g; ctx.fill();
+    ctx.save(); body(); ctx.clip();
+    // Faded hazard band with black diagonal stripes
+    ctx.fillStyle = 'rgba(214,170,48,0.75)'; ctx.fillRect(-7, -12.6, 14, 4.4);
+    ctx.fillStyle = 'rgba(20,12,6,0.75)'; ctx.beginPath();
+    for (let sx = -9; sx < 8; sx += 3) { ctx.moveTo(sx, -8.2); ctx.lineTo(sx + 1.5, -8.2); ctx.lineTo(sx + 3.6, -12.6); ctx.lineTo(sx + 2.1, -12.6); ctx.closePath(); }
+    ctx.fill();
+    // Rust streaks running down from the rim, and patches eating the paint
+    ctx.strokeStyle = 'rgba(70,24,8,0.6)'; ctx.lineWidth = 0.7; ctx.beginPath();
+    [[-3.6, 6], [-1.2, 9], [2.4, 5], [4.2, 11]].forEach(([sx, L]) => { ctx.moveTo(sx, -16.5); ctx.quadraticCurveTo(sx + 0.3, -16.5 + L * 0.5, sx - 0.2, -16.5 + L); });
+    ctx.stroke();
+    [[-3, -10.4, 1.6], [3.2, -4, 2], [-4.4, -3, 1.2], [1, -11.4, 1]].forEach(([px, py, pr]) => {
+      const rg = ctx.createRadialGradient(px, py, 0, px, py, pr); rg.addColorStop(0, 'rgba(84,30,10,0.85)'); rg.addColorStop(1, 'rgba(84,30,10,0)');
+      ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+    });
+    // A dent catching the light along its top edge
+    ctx.fillStyle = 'rgba(20,6,2,0.5)'; ctx.beginPath(); ctx.ellipse(2.6, -5.6, 1.9, 1.2, 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,190,140,0.4)'; ctx.lineWidth = 0.4; ctx.beginPath(); ctx.ellipse(2.6, -5.6, 1.9, 1.2, 0.3, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+    ctx.restore();
+    // Rolled hoops
+    [-13.6, -6.6].forEach((hy) => {
+      ctx.strokeStyle = 'rgba(30,10,4,0.7)'; ctx.lineWidth = 1.1;
+      ctx.beginPath(); ctx.ellipse(0, hy, 6.45, 2, 0, 0.05, Math.PI - 0.05); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,170,110,0.35)'; ctx.lineWidth = 0.45;
+      ctx.beginPath(); ctx.ellipse(0, hy - 0.6, 6.45, 2, 0, 0.3, Math.PI * 0.75); ctx.stroke();
+    });
+    body(); ctx.strokeStyle = INK; ctx.lineWidth = 0.6; ctx.stroke();
+    // Open top: the rim, the fire's glow inside and the coals
+    ctx.fillStyle = '#1A0904'; ctx.beginPath(); ctx.ellipse(0, -16.5, 6, 2, 0, 0, Math.PI * 2); ctx.fill();
+    const coal = ctx.createRadialGradient(0, -16.2, 0.3, 0, -16.4, 5.5);
+    coal.addColorStop(0, '#FFD27A'); coal.addColorStop(0.4, '#F07A28'); coal.addColorStop(1, 'rgba(120,30,8,0)');
+    ctx.fillStyle = coal; ctx.beginPath(); ctx.ellipse(0, -16.3, 5.2, 1.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#3A1A0C'; ctx.lineWidth = 0.9; ctx.beginPath(); ctx.ellipse(0, -16.5, 6, 2, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,190,120,0.55)'; ctx.lineWidth = 0.45; ctx.beginPath(); ctx.ellipse(0, -16.5, 6, 2, 0, Math.PI * 0.05, Math.PI * 0.95); ctx.stroke();
+    // A scorched plank leaning on it, and ash and embers round its foot
+    ctx.save(); ctx.translate(7.6, 0.6); ctx.rotate(-0.42);
+    const pl = ctx.createLinearGradient(-1.3, 0, 1.3, 0); pl.addColorStop(0, '#6A4A2E'); pl.addColorStop(1, '#2E1E12');
+    ctx.fillStyle = pl; ctx.fillRect(-1.3, -13, 2.6, 13); ctx.strokeStyle = INK; ctx.lineWidth = 0.5; ctx.strokeRect(-1.3, -13, 2.6, 13);
+    ctx.fillStyle = '#140A06'; ctx.beginPath(); ctx.moveTo(-1.3, -13); ctx.lineTo(1.3, -13); ctx.lineTo(1.3, -10.4); ctx.quadraticCurveTo(0, -11.6, -1.3, -9.6); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(40,34,32,0.7)'; ctx.beginPath(); ctx.ellipse(-8, 1.2, 3.6, 0.9, 0, 0, Math.PI * 2); ctx.fill();
+    [[-9, 1, '#FF9A3A'], [-7, 1.5, '#FFC46A'], [-10.4, 1.4, '#E2561C']].forEach(([ex, ey, c]) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(ex, ey, 0.4, 0, Math.PI * 2); ctx.fill(); });
+  }
+
+  // Straw bales stacked as a track barrier — two below and one on top,
+  // each a boxy bale with a sun-bleached top, straw poking out every way
+  // and twine binding it — with a chequered flag draped over the top one
+  // and loose straw scattered round the base.
+  drawPropHayBales() {
+    const ctx = this.ctx, INK = 'rgba(60,40,10,0.75)';
+    const bale = (x, y, w, h, seed) => {
+      const d = 2.6;
+      ctx.fillStyle = '#E6CB7A';
+      ctx.beginPath(); ctx.moveTo(x, y - h); ctx.lineTo(x + d, y - h - d); ctx.lineTo(x + w + d, y - h - d); ctx.lineTo(x + w, y - h); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#8E6C2C';
+      ctx.beginPath(); ctx.moveTo(x + w, y); ctx.lineTo(x + w, y - h); ctx.lineTo(x + w + d, y - h - d); ctx.lineTo(x + w + d, y - d); ctx.closePath(); ctx.fill();
+      const fg = ctx.createLinearGradient(0, y - h, 0, y);
+      fg.addColorStop(0, '#D4AE5C'); fg.addColorStop(1, '#A47E36');
+      ctx.fillStyle = fg; ctx.fillRect(x, y - h, w, h);
+      // Straw texture: short strokes in light and dark straw
+      ctx.lineWidth = 0.35; ctx.lineCap = 'round';
+      for (let i = 0; i < 34; i++) {
+        const hx = Math.sin((seed * 31 + i) * 12.9898) * 43758.5453, hy = Math.sin((seed * 17 + i) * 78.233) * 12543.731;
+        const fx = hx - Math.floor(hx), fy = hy - Math.floor(hy), a = (fx - 0.5) * 1.2;
+        const sx = x + 0.6 + fx * (w - 1.2), sy = y - h + 0.6 + fy * (h - 1.2);
+        ctx.strokeStyle = i % 3 ? 'rgba(250,226,150,0.7)' : 'rgba(110,80,26,0.6)';
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + Math.cos(a) * 1.8, sy + Math.sin(a) * 1.8); ctx.stroke();
+      }
+      // Wisps poking out of the edges
+      ctx.strokeStyle = '#E8CC7C'; ctx.beginPath();
+      for (let i = 0; i < 6; i++) { const ex = x + 1 + i * (w - 2) / 5; ctx.moveTo(ex, y - h); ctx.lineTo(ex + (i % 2 ? 0.8 : -0.6), y - h - 1.2); }
+      ctx.moveTo(x, y - h * 0.4); ctx.lineTo(x - 1.2, y - h * 0.5); ctx.moveTo(x, y - h * 0.7); ctx.lineTo(x - 1, y - h * 0.62);
+      ctx.stroke();
+      // Twine round the bale
+      ctx.strokeStyle = 'rgba(80,46,20,0.8)'; ctx.lineWidth = 0.45; ctx.beginPath();
+      [0.28, 0.72].forEach((t) => { const tx = x + w * t; ctx.moveTo(tx, y); ctx.lineTo(tx, y - h); ctx.lineTo(tx + d, y - h - d); });
+      ctx.stroke(); ctx.lineCap = 'butt';
+      ctx.strokeStyle = INK; ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.rect(x, y - h, w, h); ctx.moveTo(x, y - h); ctx.lineTo(x + d, y - h - d); ctx.lineTo(x + w + d, y - h - d); ctx.lineTo(x + w + d, y - d); ctx.lineTo(x + w, y); ctx.moveTo(x + w, y - h); ctx.lineTo(x + w + d, y - h - d); ctx.stroke();
+    };
+    bale(-16, 0, 15, 8, 1); bale(0, 0, 15, 8, 2); bale(-8.5, -8, 15, 8, 3);
+    // Chequered flag draped over the top bale
+    ctx.save(); ctx.translate(-5.5, -16.4);
+    const cell = 1.9, wave = (cx) => Math.sin(cx * 0.9) * 0.5;
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
+      ctx.fillStyle = (r + c) % 2 ? '#F2F2EE' : '#16181C';
+      const x0 = c * cell, y0 = r * cell;
+      ctx.beginPath(); ctx.moveTo(x0, y0 + wave(x0)); ctx.lineTo(x0 + cell, y0 + wave(x0 + cell)); ctx.lineTo(x0 + cell, y0 + cell + wave(x0 + cell)); ctx.lineTo(x0, y0 + cell + wave(x0)); ctx.closePath(); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 0.4; ctx.strokeRect(0, 0, cell * 4, cell * 4 + 0.5);
+    ctx.restore();
+    ctx.strokeStyle = '#C9A85A'; ctx.lineWidth = 0.4; ctx.beginPath();
+    [[-19, 0.8, -15, 0.2], [16, 1, 19.5, 0.4], [-13, 1.4, -10, 1.6], [12, 1.6, 9, 1.2], [-21, 1.6, -19.6, 0.4]].forEach(([a, b, c2, d2]) => { ctx.moveTo(a, b); ctx.lineTo(c2, d2); });
+    ctx.stroke();
+  }
+
+  // A saguaro: a ribbed column with two arms crooked up, studded with
+  // spines that catch the light, a pink flower on top, and a little one
+  // sprouting beside it.
+  drawPropCactus() {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const limbs = (s, dx, dy) => {
+      ctx.beginPath();
+      ctx.moveTo(dx, dy - 1 * s); ctx.lineTo(dx, dy - 29 * s);
+      ctx.moveTo(dx, dy - 12 * s); ctx.quadraticCurveTo(dx - 8 * s, dy - 12 * s, dx - 8 * s, dy - 18 * s); ctx.lineTo(dx - 8 * s, dy - 22 * s);
+      ctx.moveTo(dx, dy - 17 * s); ctx.quadraticCurveTo(dx + 7 * s, dy - 17 * s, dx + 7 * s, dy - 22 * s); ctx.lineTo(dx + 7 * s, dy - 26 * s);
+    };
+    const plant = (s, dx, dy) => {
+      limbs(s, dx, dy); ctx.strokeStyle = '#16260F'; ctx.lineWidth = 7.4 * s; ctx.stroke();
+      limbs(s, dx, dy); ctx.strokeStyle = '#3E6A30'; ctx.lineWidth = 6.2 * s; ctx.stroke();
+      ctx.save(); ctx.translate(-1.2 * s, 0);
+      limbs(s, dx, dy); ctx.strokeStyle = '#5C8C44'; ctx.lineWidth = 2.6 * s; ctx.stroke();
+      ctx.restore();
+      ctx.save(); ctx.translate(1.9 * s, 0);
+      limbs(s, dx, dy); ctx.strokeStyle = '#2A4A20'; ctx.lineWidth = 1.6 * s; ctx.stroke();
+      ctx.restore();
+      // Ribs down each limb, and spines along them
+      ctx.lineWidth = 0.35 * s;
+      [-1.6, 0.4].forEach((o) => { ctx.save(); ctx.translate(o * s, 0); limbs(s, dx, dy); ctx.strokeStyle = 'rgba(20,40,14,0.6)'; ctx.stroke(); ctx.restore(); });
+      ctx.fillStyle = 'rgba(240,236,200,0.85)';
+      for (let i = 0; i < 12; i++) {
+        const py = dy - (2.5 + i * 2.2) * s;
+        ctx.beginPath(); ctx.arc(dx - 3 * s, py, 0.32 * s, 0, Math.PI * 2); ctx.arc(dx + 3.1 * s, py - 1.1 * s, 0.32 * s, 0, Math.PI * 2); ctx.fill();
+      }
+      for (let i = 0; i < 4; i++) {
+        ctx.beginPath(); ctx.arc(dx - 11 * s, dy - (16 + i * 1.8) * s, 0.3 * s, 0, Math.PI * 2); ctx.arc(dx + 10 * s, dy - (20 + i * 1.8) * s, 0.3 * s, 0, Math.PI * 2); ctx.fill();
+      }
+    };
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(2, 0.6, 12, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+    plant(0.42, 11, 1);
+    plant(1, 0, 0);
+    // A flower on the crown
+    [[-1.2, -32.2], [1.2, -32.2], [0, -33.4]].forEach(([fx, fy]) => { ctx.fillStyle = '#F2A6C8'; ctx.beginPath(); ctx.arc(fx, fy, 1.05, 0, Math.PI * 2); ctx.fill(); });
+    ctx.fillStyle = '#FFE38A'; ctx.beginPath(); ctx.arc(0, -32.5, 0.6, 0, Math.PI * 2); ctx.fill();
+    ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+    this.drawSandDrift(1, 0.8, 7, 2);
+  }
+
+  // A dead, gnarled tree with its roots clawing out of the dirt, bark split
+  // along the trunk and moonlight along one side of every limb — and a
+  // vulture hunched on a branch, waiting.
+  drawPropDeadTree() {
+    const ctx = this.ctx;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(1, 0.8, 11, 2.2, 0, 0, Math.PI * 2); ctx.fill();
+    // Each limb a list of points with a width at each, drawn as a chain of
+    // tapering segments
+    const LIMBS = [
+      [[0, 1, 5], [0.8, -8, 4.2], [-0.6, -16, 3.4], [0.4, -23, 2.7]],
+      [[0.2, -21, 2.2], [-4.6, -26, 1.6], [-9, -29.5, 1.1], [-13.6, -30.2, 0.6]],
+      [[-9, -29.5, 0.8], [-10, -34, 0.5], [-9.2, -36.4, 0.3]],
+      [[0, -18, 2.1], [4.6, -23, 1.6], [9.6, -26.2, 1.1], [14, -25.6, 0.6]],
+      [[11.4, -26, 0.6], [13, -29.6, 0.35]],
+      [[0.4, -23, 1.8], [1.6, -29, 1.2], [0.4, -34, 0.7], [1.6, -37.6, 0.35]],
+      [[0.6, -9, 1.3], [4.4, -12.4, 0.8], [6.4, -12.6, 0.4]],
+      [[-0.4, 0.4, 1.6], [-5.4, 1.4, 0.9], [-8, 1.8, 0.4]],
+      [[0.6, 0.4, 1.6], [5, 1.2, 0.9], [7.6, 1, 0.4]],
+    ];
+    const pass = (color, widen, dx) => {
+      ctx.strokeStyle = color;
+      LIMBS.forEach((L) => {
+        for (let i = 1; i < L.length; i++) {
+          ctx.lineWidth = Math.max(0.2, (L[i - 1][2] + L[i][2]) / 2 + widen);
+          ctx.beginPath(); ctx.moveTo(L[i - 1][0] + dx, L[i - 1][1]); ctx.lineTo(L[i][0] + dx, L[i][1]); ctx.stroke();
+        }
+      });
+    };
+    pass('#140E0A', 0.9, 0);
+    pass('#4C3E32', 0, 0);
+    pass('#8A7B6A', -1.2 * 0.8, -0.7);
+    pass('#2E241C', -1.4 * 0.8, 0.9);
+    ctx.strokeStyle = 'rgba(16,10,6,0.6)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    ctx.moveTo(-0.6, -2); ctx.lineTo(0.2, -9); ctx.lineTo(-0.8, -15); ctx.moveTo(1.2, -5); ctx.lineTo(1.6, -11); ctx.stroke();
+    // The vulture, hunched with its wings drawn round it
+    ctx.save(); ctx.translate(9.4, -26.4);
+    ctx.fillStyle = '#1E1612';
+    ctx.beginPath(); ctx.moveTo(-2.6, -4.6); ctx.quadraticCurveTo(-4, -1, -2, 0.4); ctx.lineTo(2.4, 4.4); ctx.lineTo(3.4, 3.6);
+    ctx.quadraticCurveTo(3.6, -2, 1.2, -5.4); ctx.quadraticCurveTo(-0.8, -6.6, -2.6, -4.6); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(190,176,160,0.5)'; ctx.lineWidth = 0.35;
+    ctx.beginPath(); ctx.moveTo(1.2, -5.2); ctx.quadraticCurveTo(3.2, -2, 3, 3.4); ctx.moveTo(-0.6, -2.6); ctx.quadraticCurveTo(1.2, 0, 2.2, 3.2); ctx.stroke();
+    ctx.strokeStyle = '#2A201A'; ctx.lineWidth = 0.9; ctx.beginPath(); ctx.moveTo(-1.8, -4.8); ctx.quadraticCurveTo(-3.4, -6.6, -4.4, -6.4); ctx.stroke();
+    ctx.fillStyle = '#B83A30'; ctx.beginPath(); ctx.ellipse(-4.8, -6.6, 1.15, 0.9, -0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#EDE2CC'; ctx.beginPath(); ctx.moveTo(-5.7, -7); ctx.quadraticCurveTo(-7, -6.8, -6.6, -5.9); ctx.lineTo(-5.6, -6.2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#0A0604'; ctx.beginPath(); ctx.arc(-5, -6.9, 0.22, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#C9A79A'; ctx.lineWidth = 0.35; ctx.beginPath(); ctx.moveTo(-0.6, 0.2); ctx.lineTo(-0.8, 0.9); ctx.moveTo(0.4, 0.4); ctx.lineTo(0.3, 1.1); ctx.stroke();
+    ctx.restore();
+    ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+    this.drawSandDrift(0, 1.4, 8, 2);
+  }
+
+  // A crooked warning sign: a weathered plank nailed to a stake, "DANGER"
+  // daubed on it in red that's run and dripped, a split along the grain
+  // and a corner broken off, with a skull and crossbones scratched under it.
+  drawPropWarningSign() {
+    const ctx = this.ctx, INK = 'rgba(20,12,6,0.85)';
+    ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0, 1, 7, 1.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.save(); ctx.rotate(0.07);
+    const stake = ctx.createLinearGradient(-1.2, 0, 1.2, 0); stake.addColorStop(0, '#7A5A3A'); stake.addColorStop(1, '#3A2818');
+    ctx.fillStyle = stake; ctx.fillRect(-1.2, -27, 2.4, 28); ctx.strokeStyle = INK; ctx.lineWidth = 0.5; ctx.strokeRect(-1.2, -27, 2.4, 28);
+    ctx.save(); ctx.translate(0, -21.5); ctx.rotate(-0.09);
+    const board = () => { ctx.beginPath(); ctx.moveTo(-11, -4.6); ctx.lineTo(9.4, -4.8); ctx.lineTo(11, -3.2); ctx.lineTo(11, 4.4); ctx.lineTo(-11, 4.6); ctx.closePath(); };
+    const bg = ctx.createLinearGradient(0, -4.8, 0, 4.6); bg.addColorStop(0, '#B08A5C'); bg.addColorStop(1, '#7E5E3C');
+    board(); ctx.fillStyle = bg; ctx.fill();
+    ctx.save(); board(); ctx.clip();
+    ctx.strokeStyle = 'rgba(60,38,18,0.35)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    [-2.6, -0.4, 1.8, 3.4].forEach((gy, i) => { ctx.moveTo(-11, gy); ctx.bezierCurveTo(-4, gy - 0.5 + i * 0.2, 3, gy + 0.6, 11, gy - 0.2); });
+    ctx.stroke();
+    ctx.fillStyle = '#B42A20'; ctx.font = `italic 800 6.2px ${FONT_NUM}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('DANGER', 0, -0.4);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.strokeStyle = '#B42A20'; ctx.lineWidth = 0.5; ctx.lineCap = 'round'; ctx.beginPath();
+    [[-5.6, 2.4, 1.6], [-0.6, 2.6, 2.2], [4.6, 2.4, 1.2]].forEach(([dx, dy, L]) => { ctx.moveTo(dx, dy); ctx.lineTo(dx, dy + L); });
     ctx.stroke(); ctx.lineCap = 'butt';
-    boulder(7, 2, 5.2, 2.8, -1);
-    this.drawSandDrift(0, 2.4, 12, 2.2);
+    ctx.restore();
+    board(); ctx.strokeStyle = INK; ctx.lineWidth = 0.55; ctx.stroke();
+    ctx.strokeStyle = 'rgba(20,12,6,0.7)'; ctx.lineWidth = 0.4; ctx.beginPath(); ctx.moveTo(6, 4.5); ctx.lineTo(7.4, 1.8); ctx.lineTo(9, 1.2); ctx.stroke();
+    ctx.fillStyle = '#5A5450'; [[-9.6, -3], [9.4, -1.8], [-9.6, 3], [9.4, 3]].forEach(([nx, ny]) => { ctx.beginPath(); ctx.arc(nx, ny, 0.45, 0, Math.PI * 2); ctx.fill(); });
+    ctx.restore();
+    // Skull and crossbones scratched into the stake below the board
+    ctx.strokeStyle = 'rgba(236,224,200,0.75)'; ctx.lineWidth = 0.35; ctx.beginPath();
+    ctx.moveTo(-1, -11); ctx.lineTo(1, -9); ctx.moveTo(1, -11); ctx.lineTo(-1, -9); ctx.stroke();
+    ctx.fillStyle = 'rgba(236,224,200,0.8)'; ctx.beginPath(); ctx.arc(0, -13, 0.85, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#3A2818'; ctx.beginPath(); ctx.arc(-0.3, -13.1, 0.2, 0, Math.PI * 2); ctx.arc(0.3, -13.1, 0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    this.drawSandDrift(0, 1.2, 5, 1.6);
+  }
+
+  // A dry tumbleweed: a ball of wiry, tangled twigs, pale straw on the lit
+  // side and dark through its core, baked once and drawn wherever one sits
+  // or rolls by (see drawTumbleweed).
+  tumbleweedSprite() {
+    if (this._tumble && this._tumble.dpr === this.dpr) return this._tumble;
+    const R = 16, dpr = this.dpr, c = document.createElement('canvas');
+    c.width = c.height = Math.round(R * 2 * dpr);
+    const t = c.getContext('2d');
+    t.setTransform(dpr, 0, 0, dpr, R, R);
+    const core = t.createRadialGradient(0, 0, 0, 0, 0, R * 0.9);
+    core.addColorStop(0, 'rgba(84,60,32,0.55)'); core.addColorStop(0.7, 'rgba(70,50,28,0.3)'); core.addColorStop(1, 'rgba(70,50,28,0)');
+    t.fillStyle = core; t.beginPath(); t.arc(0, 0, R * 0.9, 0, Math.PI * 2); t.fill();
+    // Loops of wiry stem wound round and round the ball, then a few
+    // crossing it, each pale where the light catches the top
+    t.lineCap = 'round';
+    for (let i = 0; i < 54; i++) {
+      const h = Math.sin(i * 12.9898) * 43758.5453, f = h - Math.floor(h), g2 = (f * 13.7) % 1;
+      const rr = R * (0.14 + 0.78 * f), a0 = i * 2.39996, span = 1.2 + g2 * 2.2, ox = Math.cos(a0 * 1.7) * R * 0.12, oy = Math.sin(a0 * 1.3) * R * 0.12;
+      const mid = a0 + span / 2, lit = Math.sin(mid) < -0.2 && Math.cos(mid) < 0.5;
+      t.strokeStyle = lit ? 'rgba(226,198,140,0.95)' : i % 3 ? 'rgba(164,130,80,0.9)' : 'rgba(92,66,36,0.95)';
+      t.lineWidth = 0.5 + (i % 4) * 0.14;
+      t.beginPath(); t.arc(ox, oy, rr, a0, a0 + span); t.stroke();
+    }
+    t.strokeStyle = 'rgba(120,92,56,0.8)'; t.lineWidth = 0.5;
+    for (let i = 0; i < 8; i++) { const a = i * 0.8; t.beginPath(); t.moveTo(Math.cos(a) * R * 0.85, Math.sin(a) * R * 0.85); t.quadraticCurveTo(Math.cos(a + 2) * R * 0.2, Math.sin(a + 2) * R * 0.2, Math.cos(a + 2.6) * R * 0.8, Math.sin(a + 2.6) * R * 0.8); t.stroke(); }
+    return (this._tumble = { canvas: c, R, dpr });
+  }
+
+  // A tumbleweed of radius `r` at (x, y) (its centre), turned `rot`, with a
+  // shadow on the ground `lift` below it.
+  drawTumbleweed(x, y, r, rot, lift = 0) {
+    const ctx = this.ctx, T = this.tumbleweedSprite(), k = r / T.R;
+    ctx.fillStyle = `rgba(0,0,0,${0.3 / (1 + lift * 0.08)})`;
+    ctx.beginPath(); ctx.ellipse(x, y + r + lift, r * 1.05, r * 0.24, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(k, k);
+    ctx.drawImage(T.canvas, -T.R, -T.R, T.R * 2, T.R * 2);
+    ctx.restore();
+  }
+
+  // A tumbleweed rolling through the pit now and then, bouncing on the
+  // breeze — it scrolls with the ground as the camera follows the rider.
+  drawRollingTumbleweed(W, H, ts, r) {
+    const span = W * 2.6 + 200, x = ((((ts * 0.06 - this.camX) % span) + span) % span) - 100;
+    if (x > W + 40) return;
+    const pitTop = r.gY + this.trackHeight(W, H), rad = Math.max(10, Math.min(16, H * 0.022));
+    const base = pitTop + (H - pitTop) * 0.5, hop = Math.abs(Math.sin(x * 0.03)) * rad * 1.3;
+    this.drawTumbleweed(x, base - rad - hop, rad, x / rad, hop);
   }
 
   // A thin, uneven dusting of sand across a mostly-buried full skeleton —
