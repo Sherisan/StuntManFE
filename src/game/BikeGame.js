@@ -327,25 +327,18 @@ export class BikeGame {
   }
 
   // ── Round lifecycle ──────────────────────────────────────────────────────
-  // `crashAt` (when supplied) is the server's provably-fair crash multiplier and
-  // drives the outcome directly. When absent (server offline) we fall back to the
-  // local crypto RNG plus a random weather modifier.
-  async startRound({ pred, roundNum, crashAt = null }) {
+  // The outcome comes from the local crypto RNG plus a random weather modifier.
+  async startRound({ pred, roundNum }) {
     this.pred = pred;
     this.roundNum = roundNum;
 
     const rider = RIDERS[Math.floor(Math.random() * RIDERS.length)];
     const bike = BIKES[Math.floor(Math.random() * BIKES.length)];
 
-    if (crashAt != null && Number.isFinite(crashAt)) {
-      this.crashAt = Math.max(1.01, Math.min(crashAt, 200));
-      this.cb.onMeta?.({ rider, bike, weather: 'Live RNG' });
-    } else {
-      await this.initRNG();
-      const wx = WEATHERS[Math.floor(Math.random() * WEATHERS.length)];
-      this.crashAt = Math.max(1.01, this.crashAt * wx.mult);
-      this.cb.onMeta?.({ rider, bike, weather: wx.label });
-    }
+    await this.initRNG();
+    const wx = WEATHERS[Math.floor(Math.random() * WEATHERS.length)];
+    this.crashAt = Math.max(1.01, this.crashAt * wx.mult);
+    this.cb.onMeta?.({ rider, bike, weather: wx.label });
 
     this.startCountdown();
   }

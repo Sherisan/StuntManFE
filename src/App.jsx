@@ -3,9 +3,8 @@ import MainMenu from './MainMenu.jsx';
 import BetSlip from './components/BetSlip.jsx';
 import { AccuracyBar, SessionCard, RecentRounds, PayoutRules } from './components/InfoPanels.jsx';
 import { BikeGame } from './game/BikeGame.js';
-import { calcPayout, serverMultToCrashAt, PAYOUT_TIERS } from './game/logic.js';
+import { calcPayout, PAYOUT_TIERS } from './game/logic.js';
 import { playWin, playLose, playDeposit, playWithdraw, playCountdownBeep, playClick, playBet, gameSfx, unlockAudio, setSoundEnabled, setMusicEnabled } from './game/sound.js';
-import { GameServer } from './api/gameServer.js';
 
 const START_BALANCE = 1000;
 const BET_KEY = 'bikeit_bet';
@@ -47,9 +46,6 @@ function vibrate(pattern) {
 export default function App() {
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
-  const serverRef = useRef(null);
-  const seededFromServerRef = useRef(false);
-  const serverOutcomeRef = useRef(null);
 
   // ── Core game state (React-owned) ──────────────────────────────────────────
   const [balance, setBalance] = useState(START_BALANCE);
@@ -223,7 +219,6 @@ export default function App() {
         { tier: r1.tier, won: won1, pm: r1.mult, payout: payout1, pred: pred1, bet: bet1, errPct },
         ...(bet2Active ? [{ tier: r1.tier, won: won1, pm: r1.mult, payout: payout2, pred: pred1, bet: bet2, errPct }] : []),
       ],
-      fairness: serverOutcomeRef.current,
     });
   }, []);
 
@@ -286,22 +281,6 @@ export default function App() {
   // The menu runs its own live arena, so the (hidden) game canvas behind it
   // stops rendering until the player leaves the menu.
   useEffect(() => { gameRef.current?.setSuspended(showMenu); }, [showMenu]);
-
-  // ── Server connection: source RNG (crash multiplier) + balance ─────────────
-  useEffect(() => {
-    const server = new GameServer();
-    serverRef.current = server;
-    server.onBalance = (b) => {
-      // Seed the local balance from the server once; don't wipe local progress
-      // on later reconnects (this integration keeps betting client-side).
-      if (!seededFromServerRef.current) {
-        seededFromServerRef.current = true;
-        setBalance(b);
-      }
-    };
-    server.connect();
-    return () => { server.disconnect(); serverRef.current = null; };
-  }, []);
 
   // ── Persist bet/prediction across sessions ──────────────────────────────────
   useEffect(() => { localStorage.setItem(BET_KEY, betInput); }, [betInput]);
@@ -465,17 +444,10 @@ export default function App() {
     setPredDisplay(pred1 + ' m');
     setDistance('— m');
 
-    // Use the server's latest provably-fair crash multiplier as this launch's
-    // outcome; falls back to the engine's local RNG when the server is offline.
-    const outcome = serverRef.current?.takeOutcome() || null;
-    serverOutcomeRef.current = outcome;
     if (soundOnRef.current) playBet();
 
-    gameRef.current.startRound({
-      pred: pred1,
-      roundNum: roundNumRef.current,
-      crashAt: outcome ? serverMultToCrashAt(outcome.multiplier) : null,
-    });
+    // The engine rolls this launch's outcome with its own random generator
+    gameRef.current.startRound({ pred: pred1, roundNum: roundNumRef.current });
   };
 
   const handleMain = () => { if (phase === 'idle') startRound(); };
@@ -709,12 +681,6 @@ export default function App() {
                 <b className={resultNet >= 0 ? 'pos' : 'neg'}>{resultNet >= 0 ? '+' : '−'}R{Math.abs(resultNet).toFixed(2)}</b>
               </div>
             </div>
-            <div id="fairness">
-              {result.fairness
-                ? <>⛓ Server RNG · <b>{result.fairness.multiplier.toFixed(2)}×</b> crash
-                    {result.fairness.roundId ? <> · #{String(result.fairness.roundId).slice(0, 8)}</> : null}</>
-                : <>⚠ Offline RNG (server unreachable)</>}
-            </div>
             {autoActive ? (
               <div className="auto-hint">
                 <span>{autoFinishing ? 'Auto bet · finishing the run' : `Auto bet · next round starting · ${autoRoundsLeft - 1} to go`}</span>
@@ -734,7 +700,7 @@ export default function App() {
             <div className="steps">
               <div className="modal-step"><span className="num">1</span> Set your bet amount and predict how far (in meters) the bike will fly off the ramp.</div>
               <div className="modal-step"><span className="num">2</span> Place your bet — the bike races down the ramp and launches off the jump.</div>
-              <div className="modal-step"><span className="num">3</span> The landing distance is decided by a provably-fair server RNG (or a local RNG if the server is offline).</div>
+              <div className="modal-step"><span className="num">3</span> The landing distance is decided by the game's cryptographic random number generator.</div>
               <div className="modal-step"><span className="num">4</span> Your payout depends on how close your prediction was to where it actually landed — closer is worth more.</div>
             </div>
 
@@ -965,7 +931,7 @@ export default function App() {
                   <div className="legal-text">
                     <p><b>Bike It</b> — a provably-fair-flavored motocross distance-prediction game.</p>
                     <p>Version 1.0.0 · Built with React + Canvas.</p>
-                    <p>Round outcomes use a server-provided crash multiplier when the RNG service is reachable, and fall back to a local cryptographic RNG otherwise — check the fairness note under each round's result to see which one applied.</p>
+                    <p>Each round's outcome comes from a cryptographic random number generator in the game.</p>
                   </div>
                 )}
               </>

@@ -1,16 +1,5 @@
 // Pure scoring logic shared between the engine outcome and the UI.
 
-// Maps the server's provably-fair crash multiplier (1.00 … up to 10000) into the
-// bike engine's `crashAt` band. The transform is monotonic — a higher server
-// multiplier always yields a longer flight — but log-compressed and capped so a
-// rare huge multiplier can't launch a 30-second flight that overshoots every
-// prediction. Landings then stay within roughly the 100–380m the UI targets.
-export function serverMultToCrashAt(m) {
-  if (!Number.isFinite(m) || m <= 1) return 1.01;
-  const c = 1 + 3.2 * Math.log(m);
-  return Math.max(1.01, Math.min(c, 15));
-}
-
 // Single source of truth for the payout ladder — drives both the scoring in
 // calcPayout() and the rules UI (side panel + "How it works" modal), so the
 // numbers shown to the player can never drift from what they're actually paid.

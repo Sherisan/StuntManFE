@@ -22,9 +22,6 @@ pnpm-debug.log*
 logs/
 *.log
 
-# Backend API — its own repo (github.com/Sherisan/GameEngineAPI)
-GameEngineAPI/
-
 # Editor / OS
 .vscode/*
 !.vscode/extensions.json
