@@ -2776,7 +2776,9 @@ export class BikeGame {
             hair: HAIRS[(rand() * HAIRS.length) | 0],
             cap,
             // 0 short, 1 long, 2 shaved, 3 bun / topknot
-            style: cap ? 0 : pick([[0, 10], [1, 4], [2, 2], [3, 1.4]]),
+            // 0 short, 1 long, 2 shaved, 3 bun, 4 afro
+            style: cap ? 0 : pick([[0, 10], [1, 4], [2, 2], [3, 1.4], [4, 1.6]]),
+            beanie: !!cap && rand() < 0.35,
             stripe: rand() < 0.24 ? pick(STRIPES) : null,
             lean: (rand() - 0.5) * 0.7,
             phase: rand() * Math.PI * 2,
@@ -2789,7 +2791,7 @@ export class BikeGame {
             scarf: depth > 0.62 && rand() < 0.06 ? pick(SCARVES) : null,
           });
         }
-        this.crowdRows.push({ deck, t, depth, size, seats });
+        this.crowdRows.push({ deck, t, depth, size, seats, count, off: r % 2 ? 0.75 : 0.25 });
       }
     });
   }
@@ -2933,14 +2935,18 @@ export class BikeGame {
           ctx.fillStyle = SEAT[s];
           ctx.fillRect(xAt(sections[s]), y - size * 0.05, xAt(sections[s + 1]) - xAt(sections[s]), size * 0.7);
         }
+        if (size >= 4) this.paintSeatBacks(ctx, g, row, y, size);
 
         if (row.deck === 'upper') this.paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance);
         else this.paintNearFans(ctx, g, row, y, size, ts, this.liveWaveRow(row, g) ? null : waveX, armsUpChance);
 
         ctx.fillStyle = row.deck === 'upper' ? '#08111F' : '#0B1628';
         ctx.fillRect(0, stepY, W, deckBottom - stepY);
-        ctx.fillStyle = 'rgba(160,200,245,0.05)';
+        // The concrete lip of the step, catching the light, over its shadow
+        ctx.fillStyle = 'rgba(170,205,245,0.09)';
         ctx.fillRect(0, stepY, W, Math.max(1, size * 0.1));
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(0, stepY + Math.max(1, size * 0.1), W, Math.max(1, size * 0.12));
       });
       return;
     }
@@ -2969,6 +2975,16 @@ export class BikeGame {
     ctx.restore();
 
     this.aisleFracs.forEach((f) => this.paintAisle(ctx, g, xAt(f)));
+    this.aisleFracs.forEach((f) => {
+      const ex = xAt(f), ew = Math.max(9, W * 0.022), eh = ew * 0.45, ey = standTop + 3;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      const glow = ctx.createRadialGradient(ex, ey + eh / 2, 0, ex, ey + eh / 2, ew * 1.4);
+      glow.addColorStop(0, 'rgba(46,229,157,0.35)'); glow.addColorStop(1, 'rgba(46,229,157,0)');
+      ctx.fillStyle = glow; ctx.fillRect(ex - ew * 1.4, ey + eh / 2 - ew * 1.4, ew * 2.8, ew * 2.8);
+      ctx.restore();
+      ctx.fillStyle = '#0E5A3E'; ctx.fillRect(ex - ew / 2, ey, ew, eh);
+      ctx.fillStyle = '#B9FFE0'; ctx.fillRect(ex - ew * 0.34, ey + eh * 0.36, ew * 0.68, eh * 0.28);
+    });
 
     // Glass balustrades along the front of each deck, the top rail catching
     // the light (post spacing divides W exactly so the stand still tiles).
@@ -3101,6 +3117,29 @@ export class BikeGame {
     return list;
   }
 
+  // A row's moulded plastic seat backs, one per place in the row, in its
+  // section's colour with a highlight along the top — they show between the
+  // fans and wherever a seat's empty.
+  paintSeatBacks(ctx, g, row, y, size) {
+    const W = g.W, cols = row.deck === 'upper' ? ['#1A2D52', '#22385F', '#1A2D52'] : ['#11714F', '#3A4864', '#11714F'];
+    const [a1, a2] = this.aisleFracs, sec = (f) => (f < a1 ? 0 : f < a2 ? 1 : 2);
+    const w = size * 0.98, h = size * 0.74, top = y - size * 0.16, r = [size * 0.28, size * 0.28, size * 0.05, size * 0.05];
+    const paths = [[], [], []];
+    for (let i = 0; i < row.count; i++) {
+      const f = (i + row.off) / row.count;
+      if (this.aisleFracs.some((a) => Math.abs(f - a) < 0.016)) continue;
+      paths[sec(f)].push(f * W);
+    }
+    paths.forEach((xs, k) => {
+      ctx.fillStyle = cols[k]; ctx.beginPath();
+      xs.forEach((x) => ctx.roundRect(x - w / 2, top, w, h, r));
+      ctx.fill();
+    });
+    ctx.fillStyle = 'rgba(255,255,255,0.16)'; ctx.beginPath();
+    paths.forEach((xs) => xs.forEach((x) => ctx.rect(x - w * 0.34, top + size * 0.06, w * 0.68, Math.max(0.6, size * 0.07))));
+    ctx.fill();
+  }
+
   // Upper-tier fans are only a few pixels tall — plain rects read the same at
   // that size and cost a fraction of a full figure.
   paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance) {
@@ -3151,7 +3190,8 @@ export class BikeGame {
     if (size < 6.5) { this.paintFarFans(ctx, g, row, y, size, ts, waveX, armsUpChance); return; }
     const into = BikeGame.batchInto;
     const arms = new Map(), hands = new Map(), bodies = new Map(), heads = new Map(), hair = new Map(), brims = new Map(), stripes = new Map();
-    const fans = [], extras = [];
+    const afros = new Map(), poms = new Map(), claps = new Map(), clapHands = new Map();
+    const fans = [], extras = [], sleeves = [], mouths = [];
     const lag = this.waveLag(row);
     row.seats.forEach((s) => {
       const rise = this.waveRise(s.xFrac, waveX, lag);
@@ -3160,18 +3200,27 @@ export class BikeGame {
       // riders raise them as the swell lifts them.
       const raise = s.sign || s.scarf || s.armsRoll < armsUpChance ? 1 : Math.min(1, rise * 1.6);
       const phoneOn = s.phone && Math.sin(ts * 0.002 + s.phase * 3) > 0.5;
+      // A few more applaud, hands meeting in front of the chest
+      const clapping = !live && raise <= 0.15 && s.armsRoll < armsUpChance + 0.14;
       this.fanXs(s.xFrac * g.W + s.lean * size * 0.25, g.W, size * 4).forEach((x) => {
         if (raise > 0.15) {
           const ax = size * (0.6 + 0.22 * raise), ay = size * (0.3 + 0.68 * raise);
           into(arms, s.shirt).push(x - size * 0.42, yy, x - ax, yy - ay, x + size * 0.42, yy, x + ax, yy - ay);
           into(hands, s.skin).push(x - ax, yy - ay - size * 0.05, x + ax, yy - ay - size * 0.05);
-        }
+          if (raise > 0.5) mouths.push(x, yy);
+        } else if (clapping) {
+          const apart = Math.sin(ts * 0.02 + s.phase * 5) > 0 ? size * 0.12 : 0;
+          into(claps, s.shirt).push(x - size * 0.46, yy + size * 0.1, x - size * 0.06 - apart, yy + size * 0.32, x + size * 0.46, yy + size * 0.1, x + size * 0.06 + apart, yy + size * 0.32);
+          into(clapHands, s.skin).push(x - apart, yy + size * 0.28, x + apart, yy + size * 0.28);
+        } else sleeves.push(x, yy);
+        if (s.style === 4 && !s.cap) into(afros, s.hair).push(x, yy);
         into(bodies, s.shirt).push(x, yy);
         into(heads, s.skin).push(x, yy);
         if (s.cap) into(hair, s.cap).push(x, yy, 0);
         else if (s.style !== 2) into(hair, s.hair).push(x, yy, s.style || 0);
         if (s.stripe) into(stripes, s.stripe).push(x, yy);
-        if (s.cap) into(brims, s.cap).push(x, yy);
+        if (s.cap && s.beanie) into(poms, s.cap).push(x, yy);
+        else if (s.cap) into(brims, s.cap).push(x, yy);
         fans.push(x, yy);
         if (!live && (s.flag || s.scarf || s.sign || s.finger || phoneOn)) extras.push({ s, x, yy, phoneOn });
       });
@@ -3210,9 +3259,33 @@ export class BikeGame {
       }
       ctx.fill();
     }
+    if (!live) {
+      // Arms resting down the sides: a crease where each sleeve meets the body
+      ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = Math.max(0.6, size * 0.07); ctx.beginPath();
+      for (let i = 0; i < sleeves.length; i += 2) {
+        const cx = sleeves[i], cy = sleeves[i + 1];
+        ctx.moveTo(cx - size * 0.34, cy + size * 0.12); ctx.lineTo(cx - size * 0.38, cy + size * 0.62);
+        ctx.moveTo(cx + size * 0.34, cy + size * 0.12); ctx.lineTo(cx + size * 0.38, cy + size * 0.62);
+      }
+      ctx.stroke();
+      // Floodlight along the near shoulder
+      ctx.strokeStyle = 'rgba(255,236,206,0.22)'; ctx.lineWidth = Math.max(0.6, size * 0.09); ctx.beginPath();
+      for (let i = 0; i < fans.length; i += 2) { ctx.moveTo(fans[i] - size * 0.54, fans[i + 1] + size * 0.22); ctx.quadraticCurveTo(fans[i] - size * 0.54, fans[i + 1] - size * 0.08, fans[i] - size * 0.2, fans[i + 1] - size * 0.11); }
+      ctx.stroke();
+    }
+    afros.forEach((p, color) => {
+      ctx.fillStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] + size * 0.56, p[i + 1] - size * 0.6); ctx.arc(p[i], p[i + 1] - size * 0.6, size * 0.56, 0, Math.PI * 2); }
+      ctx.fill();
+    });
     heads.forEach((p, color) => {
       ctx.fillStyle = color; ctx.beginPath();
-      for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] + headR, p[i + 1] - size * 0.5); ctx.arc(p[i], p[i + 1] - size * 0.5, headR, 0, Math.PI * 2); }
+      for (let i = 0; i < p.length; i += 2) {
+        ctx.moveTo(p[i] + headR, p[i + 1] - size * 0.5); ctx.arc(p[i], p[i + 1] - size * 0.5, headR, 0, Math.PI * 2);
+        // Neck, and the open collar of the shirt
+        ctx.rect(p[i] - size * 0.13, p[i + 1] - size * 0.2, size * 0.26, size * 0.12);
+        ctx.moveTo(p[i] - size * 0.15, p[i + 1] - size * 0.11); ctx.lineTo(p[i] + size * 0.15, p[i + 1] - size * 0.11); ctx.lineTo(p[i], p[i + 1] + size * 0.1); ctx.closePath();
+      }
       ctx.fill();
     });
     if (!live) {
@@ -3222,6 +3295,20 @@ export class BikeGame {
         const cx = fans[i], cy = fans[i + 1] - size * 0.5;
         ctx.moveTo(cx, cy - headR); ctx.arc(cx, cy, headR, -Math.PI / 2, Math.PI / 2); ctx.closePath();
       }
+      ctx.fill();
+    }
+    if (!live && size >= 8) {
+      // Faces: two dark eyes, and an open, shouting mouth on the cheering
+      const er = Math.max(0.45, size * 0.05);
+      ctx.fillStyle = 'rgba(26,18,12,0.85)'; ctx.beginPath();
+      for (let i = 0; i < fans.length; i += 2) {
+        const cx = fans[i], cy = fans[i + 1] - size * 0.5;
+        ctx.moveTo(cx - size * 0.13 + er, cy); ctx.arc(cx - size * 0.13, cy, er, 0, Math.PI * 2);
+        ctx.moveTo(cx + size * 0.13 + er, cy); ctx.arc(cx + size * 0.13, cy, er, 0, Math.PI * 2);
+      }
+      ctx.fill();
+      ctx.fillStyle = 'rgba(70,16,14,0.85)'; ctx.beginPath();
+      for (let i = 0; i < mouths.length; i += 2) { ctx.moveTo(mouths[i] + size * 0.08, mouths[i + 1] - size * 0.3); ctx.ellipse(mouths[i], mouths[i + 1] - size * 0.3, size * 0.08, size * 0.07, 0, 0, Math.PI * 2); }
       ctx.fill();
     }
     // Hair: short crops, long hair down to the shoulders, or a bun on top
@@ -3242,6 +3329,32 @@ export class BikeGame {
     brims.forEach((p, color) => {
       ctx.fillStyle = color; ctx.beginPath();
       for (let i = 0; i < p.length; i += 2) ctx.rect(p[i], p[i + 1] - size * 0.62, size * 0.62, size * 0.12);
+      ctx.fill();
+    });
+    // Beanies: a folded band round the brow and a bobble on top
+    poms.forEach((p, color) => {
+      ctx.fillStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) {
+        ctx.rect(p[i] - hairR, p[i + 1] - size * 0.62, hairR * 2, size * 0.14);
+        ctx.moveTo(p[i] + size * 0.13, p[i + 1] - size * 0.99); ctx.arc(p[i], p[i + 1] - size * 0.99, size * 0.13, 0, Math.PI * 2);
+      }
+      ctx.fill();
+    });
+    if (poms.size) {
+      ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.beginPath();
+      poms.forEach((p) => { for (let i = 0; i < p.length; i += 2) ctx.rect(p[i] - hairR, p[i + 1] - size * 0.53, hairR * 2, size * 0.05); });
+      ctx.fill();
+    }
+    // Clapping hands in front of the chest
+    ctx.lineWidth = Math.max(1, size * 0.22);
+    claps.forEach((p, color) => {
+      ctx.strokeStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 4) { ctx.moveTo(p[i], p[i + 1]); ctx.lineTo(p[i + 2], p[i + 3]); }
+      ctx.stroke();
+    });
+    clapHands.forEach((p, color) => {
+      ctx.fillStyle = color; ctx.beginPath();
+      for (let i = 0; i < p.length; i += 2) { ctx.moveTo(p[i] + handR, p[i + 1]); ctx.arc(p[i], p[i + 1], handR, 0, Math.PI * 2); }
       ctx.fill();
     });
     // Floodlight catching the top of every head
@@ -3301,6 +3414,12 @@ export class BikeGame {
     ctx.lineTo(px + fw, top + fh + wv * 0.4);
     ctx.quadraticCurveTo(px + fw * 0.5, top + fh + wv, px, top + fh);
     ctx.closePath(); ctx.fill();
+    // A band across it and a round badge, so it reads as a team flag
+    const band = s.flag === '#E8EEF6' ? '#14223F' : '#F4F7FB';
+    ctx.strokeStyle = band; ctx.lineWidth = fh * 0.2;
+    ctx.beginPath(); ctx.moveTo(px, top + fh * 0.5); ctx.quadraticCurveTo(px + fw * 0.5, top + fh * 0.5 + wv, px + fw, top + fh * 0.5 + wv * 0.4); ctx.stroke();
+    ctx.fillStyle = band; ctx.beginPath(); ctx.arc(px + fw * 0.5, top + fh * 0.5 + wv * 0.5, fh * 0.26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = s.flag; ctx.beginPath(); ctx.arc(px + fw * 0.5, top + fh * 0.5 + wv * 0.5, fh * 0.14, 0, Math.PI * 2); ctx.fill();
   }
 
   paintPhoneLight(ctx, x, y, size) {

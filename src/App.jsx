@@ -260,7 +260,7 @@ export default function App() {
       onShake: () => { setShaking(false); requestAnimationFrame(() => { setShaking(true); setTimeout(() => setShaking(false), 400); }); },
       onLanded: (dist) => resolveOutcome(dist),
       onSfx: (name, v) => gameSfx(name, v),
-    }, narrow ? { crowdMs: 80, ambientFps: 30, suspended: true, tallSky: true } : { crowdMs: 50, ambientFps: 60, suspended: true, tallSky: true });
+    }, narrow ? { crowdMs: 100, ambientFps: 30, suspended: true, tallSky: true } : { crowdMs: 50, ambientFps: 60, suspended: true, tallSky: true });
     gameRef.current = game;
     return () => { game.destroy(); gameRef.current = null; };
   }, [resolveOutcome]);

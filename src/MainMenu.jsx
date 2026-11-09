@@ -74,7 +74,7 @@ function useArena(canvasRef) {
       },
     }, {
       viewShift: shift(), animateDone: true, ambientFps: 60, dragonChance: 0.5,
-      crowdMs: window.innerWidth < 700 ? 100 : 60,
+      crowdMs: window.innerWidth < 700 ? 125 : 60,
       maxDpr: window.innerWidth >= 1400 ? 1.25 : 1.5,
     });
     if (!calm) timer = setTimeout(play, 900);
