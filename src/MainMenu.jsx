@@ -200,7 +200,7 @@ export default function MainMenu({ balance, streak, onPlay, onAutoBet, onPrepare
           <div className="lobby-stats lobby-anim" style={{ '--d': '380ms' }}>
             <div className="lobby-stat lobby-stat-green"><span>Balance</span><b>R{balance.toFixed(2)}</b></div>
             <div className={'lobby-stat ' + (streak?.type === 'loss' ? 'lobby-stat-red' : 'lobby-stat-blue')}><span>Streak</span><b>{streakLabel}</b></div>
-            <div className="lobby-stat lobby-stat-gold"><span>Top payout</span><b>8× Bullseye</b></div>
+            <div className="lobby-stat lobby-stat-gold"><span>Top payout</span><b>Up to 100×</b></div>
           </div>
           {/* Phones: the three ways to win, in place of the stat cards */}
           <div className="lobby-tiers lobby-anim" style={{ '--d': '380ms' }} aria-label="Ways to win">

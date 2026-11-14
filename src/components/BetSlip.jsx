@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
-import { PAYOUT_TIERS } from '../game/logic.js';
+import { PRED_MIN, maxPred, targetForPred, winChance, fmtMult, floorCents } from '../game/logic.js';
 
 const BET_CHIPS = [10, 50, 100];
-const PRED_CHIPS = [30, 50, 80, 120, 180, 250, 350];
+const PRED_CHIPS = [30, 50, 80, 120, 180, 250];
 const ROUND_CHIPS = [10, 25, 50, 100];
-const PRED_MIN = 5, PRED_MAX = 400;
 const money = (v) => `R${v.toFixed(2)}`;
 const signed = (v) => `${v >= 0 ? '+' : '−'}${money(Math.abs(v))}`;
 
@@ -41,8 +40,9 @@ function BetRow({ label, tone, value, onChange, onSet, onHalf, onDouble, balance
 export default function BetSlip({
   balance, betInput, setBetInput, bet2Input, setBet2Input, predInput, setPredInput,
   setBet, halveBet, doubleBet, setBet2, halveBet2, doubleBet2, setPred, onKeyDown,
-  stake, overBalance, phase, betDisabled, onPlaceBet, auto,
+  stake, overBalance, phase, betDisabled, onPlaceBet, auto, maxMult, serverNote,
 }) {
+  const PRED_MAX = maxPred(maxMult);
   const [tab, setTab] = useState('manual');
   useEffect(() => { if (auto.active) setTab('auto'); }, [auto.active]);
   const locked = auto.active;
@@ -52,11 +52,15 @@ export default function BetSlip({
   const pred = parseFloat(predInput) || 0;
   const predClamped = Math.min(PRED_MAX, Math.max(PRED_MIN, pred));
   const predPct = ((predClamped - PRED_MIN) / (PRED_MAX - PRED_MIN)) * 100;
+  const target = targetForPred(predClamped, maxMult);
+  const chance = winChance(target);
   const rounds = Math.min(500, Math.max(1, parseInt(auto.rounds, 10) || 1));
   const done = auto.total - auto.left;
 
   let hint = '';
-  if (tab === 'auto' && !auto.active && !auto.canStart) {
+  if (serverNote) {
+    hint = serverNote;
+  } else if (tab === 'auto' && !auto.active && !auto.canStart) {
     hint = phase !== 'idle' ? 'Auto can start once this round finishes.'
       : 'Auto bets both stakes in full every round. Lower them or top up to start.';
   } else if (tab === 'manual' && balance < 1) {
@@ -85,16 +89,16 @@ export default function BetSlip({
         <div className="slip-pred-head">
           <span className="slip-label">Predicted landing</span>
           <label className="slip-pred-value">
-            <input type="number" inputMode="decimal" min={PRED_MIN} step="5" value={predInput} disabled={locked}
+            <input type="number" inputMode="decimal" min={PRED_MIN} max={PRED_MAX} step="5" value={predInput} disabled={locked}
               aria-label="Predicted landing in meters" onChange={(e) => setPredInput(e.target.value)} onKeyDown={keyDown} />
             <span>m</span>
           </label>
         </div>
-        <input type="range" className="slip-range" min={PRED_MIN} max={PRED_MAX} step="5" disabled={locked}
+        <input type="range" className="slip-range" min={PRED_MIN} max={PRED_MAX} step="1" disabled={locked}
           aria-label="Predicted landing slider" value={predClamped}
           style={{ '--fill': `${predPct}%` }} onChange={(e) => setPredInput(e.target.value)} />
         <div className="slip-chips">
-          {PRED_CHIPS.map((v) => (
+          {PRED_CHIPS.filter((v) => v <= PRED_MAX).map((v) => (
             <button key={v} type="button" disabled={locked} aria-pressed={pred === v} className={pred === v ? 'on' : ''} onClick={() => setPred(v)}>{v}m</button>
           ))}
         </div>
@@ -140,15 +144,18 @@ export default function BetSlip({
       )}
 
       <div className="slip-payouts">
-        <span className="slip-label">Win on {money(stake)}</span>
+        <span className="slip-label">Land at {predClamped}m or further</span>
         <div className="slip-payout-row">
-          {PAYOUT_TIERS.map((t) => (
-            <div key={t.key} className={`slip-payout t-${t.key}`} title={`${t.label} · ${t.range}`}>
-              <span className="slip-payout-top"><i aria-hidden="true">{t.icon}</i>{t.mult}×</span>
-              <b>{money(stake * t.mult)}</b>
-              <small>{t.range}</small>
-            </div>
-          ))}
+          <div className="slip-payout t-great" title="Your pick's multiplier">
+            <span className="slip-payout-top"><i aria-hidden="true">🏁</i>{fmtMult(target)}</span>
+            <b>{money(floorCents(stake * target))}</b>
+            <small>win on {money(stake)}</small>
+          </div>
+          <div className="slip-payout t-close" title="Chance the crash point reaches your pick">
+            <span className="slip-payout-top"><i aria-hidden="true">🎲</i>Chance</span>
+            <b>{chance >= 0.1 ? Math.round(chance * 100) : (chance * 100).toFixed(1)}%</b>
+            <small>96% RTP</small>
+          </div>
         </div>
       </div>
 

@@ -1,0 +1,9 @@
+{
+  "folders": [
+    { "name": "StuntManFE", "path": "." },
+    { "name": "GameEngineAPI", "path": "C:\\Users\\JaydonGenga\\Source\\repos\\GameEngineAPI" }
+  ],
+  "settings": {
+    "git.openRepositoryInParentFolders": "never"
+  }
+}

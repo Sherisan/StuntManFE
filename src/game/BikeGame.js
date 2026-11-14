@@ -5,6 +5,8 @@
 // countdown; it reports everything the UI needs through the `cb` callbacks and
 // never touches the DOM outside the canvas. React owns balance/bet/history/etc.
 
+import { multAtDist } from './logic.js';
+
 const RIDERS = ['Rookie', 'Stunt', 'Daredevil', 'Champion', 'Legendary'];
 const BIKES = ['Dirt Bike', 'Motocross', 'Racing', 'Rocket', 'Nitro'];
 const WEATHERS = [
@@ -38,17 +40,6 @@ function computeRamp(W, H, groundFrac = 0.72) {
 function bp(P0, P1, P2, t) { const m = 1 - t; return { x: m * m * P0.x + 2 * m * t * P1.x + t * t * P2.x, y: m * m * P0.y + 2 * m * t * P1.y + t * t * P2.y }; }
 function bt(P0, P1, P2, t) { const m = 1 - t; return { x: 2 * m * (P1.x - P0.x) + 2 * t * (P2.x - P1.x), y: 2 * m * (P1.y - P0.y) + 2 * t * (P2.y - P1.y) }; }
 
-// ── RNG ─────────────────────────────────────────────────────────────────────
-async function sha256(s) {
-  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join('');
-}
-function rh16(n) { return Array.from(crypto.getRandomValues(new Uint8Array(n))).map(b => b.toString(16).padStart(2, '0')).join(''); }
-function hashToCrash(hex) {
-  const n = parseInt(hex.slice(0, 8), 16) / 0xFFFFFFFF;
-  if (n < 0.01) return 1.0;
-  return Math.max(1.01, Math.min(0.99 / (1 - n), 200));
-}
 
 const CROWD_COLORS = ['#e74c3c', '#3498db', '#f1c40f', '#2ecc71', '#e67e22', '#9b59b6',
   '#ff69b4', '#00bcd4', '#ff5722', '#4caf50', '#fff', '#ffeb3b', '#ff0066', '#00e5ff'];
@@ -172,7 +163,9 @@ export class BikeGame {
     this.crashAt = 2; this.mult = 1;
     this.pred = 80; this.roundNum = 1;
     this.pendingCrash = false;
-    this.serverSeed = ''; this.clientSeed = ''; this.roundHash = '';
+    // Set per round from the server's crash point; null (the menu's demo
+    // arena) lets the old free physics decide where the bike lands.
+    this.landDist = null; this.flyVx = null;
     this.bx = 0; this.by = 0; this.bvx = 0; this.bvy = 0; this.rampT = 0;
     this.trail = []; this.particles = [];
     this.approachTs = null; this.rampTs = null; this.flyTs = null; this.crashFrames = 0;
@@ -320,24 +313,20 @@ export class BikeGame {
   toMeters(worldX, r) { return Math.max(0, Math.round(((worldX - r.P2.x) * 0.22) / r.s)); }
   mToPx(m, r) { return (m / 0.22) * r.s; }
 
-  async initRNG() {
-    this.serverSeed = rh16(16); this.clientSeed = rh16(8);
-    this.roundHash = await sha256(this.serverSeed + ':' + this.clientSeed + ':' + this.roundNum);
-    this.crashAt = hashToCrash(this.roundHash);
-  }
-
   // ── Round lifecycle ──────────────────────────────────────────────────────
-  // The outcome comes from the local crypto RNG plus a random weather modifier.
-  async startRound({ pred, roundNum }) {
+  // The outcome is decided before the round starts, by the GameEngineAPI's
+  // RNG: `crashAt` is the server's crash point and `landDist` the metres it
+  // maps to (see logic.js). The engine only animates the bike to that spot.
+  // Rider, bike and weather are cosmetic.
+  startRound({ pred, roundNum, crashAt, landDist }) {
     this.pred = pred;
     this.roundNum = roundNum;
+    this.crashAt = crashAt;
+    this.landDist = landDist;
 
     const rider = RIDERS[Math.floor(Math.random() * RIDERS.length)];
     const bike = BIKES[Math.floor(Math.random() * BIKES.length)];
-
-    await this.initRNG();
     const wx = WEATHERS[Math.floor(Math.random() * WEATHERS.length)];
-    this.crashAt = Math.max(1.01, this.crashAt * wx.mult);
     this.cb.onMeta?.({ rider, bike, weather: wx.label });
 
     this.startCountdown();
@@ -368,7 +357,7 @@ export class BikeGame {
     this.rampT = 0; this.crashFrames = 0; this.camX = this.camBias(); this.camTargetX = this.camX;
     this.approachTs = null; this.rampTs = null; this.pendingCrash = false;
     this._lastDist = null; this.cheer = 0; this.landCheer = 0; this.physTs = null; this._camTs = null;
-    this.burnT = null; this._attack = false;
+    this.burnT = null; this._attack = false; this.flyVx = null;
 
     const r = this.getRamp();
     this.bx = this.startX(r); this.by = r.gY; this.bvx = 3.8; this.bvy = 0;
@@ -586,6 +575,11 @@ export class BikeGame {
         this.bvx = (tn.x / len) * spd; this.bvy = (tn.y / len) * spd;
         this.phase = 'flying'; this.flyTs = ts; this.physTs = ts;
         this.flyMs = this.flightMs(r);
+        // Steady horizontal speed that touches down exactly at the server's
+        // landing distance once the (ballistic) flight time runs out.
+        this.flyVx = this.landDist != null
+          ? Math.max(0.5 * r.s, (r.P2.x + this.mToPx(this.landDist + 0.3, r) - this.bx) / (this.flyMs / 16.6667))
+          : null;
         this.trick = this.pickTrick(this.flyMs);
         this._attack = this.flyMs > 1300 && Math.random() < this.dragonChance;
         this._trickSfx = false;
@@ -597,7 +591,12 @@ export class BikeGame {
     }
 
     if (this.phase === 'flying') {
-      const el = ts - this.flyTs; this.mult = this.calcMult(el);
+      // With a server outcome the multiplier is the one for the distance
+      // covered so far (logic.js), topping out at the crash point.
+      const el = ts - this.flyTs;
+      this.mult = this.landDist != null
+        ? Math.min(this.crashAt, multAtDist(this.toMeters(this.bx, r)))
+        : this.calcMult(el);
       this.camTargetX = Math.max(this.camBias(), this.bx - W * 0.38 + this.camBias());
       this.camX = this.camLerp(this.camX, this.camTargetX, 0.07, camDt);
       // Camera ceiling: never let the bike's screen position rise above 50%
@@ -665,20 +664,27 @@ export class BikeGame {
     const dt = this.physTs != null ? Math.min(3, Math.max(0.1, (ts - this.physTs) / 16.6667)) : 1;
     this.physTs = ts;
     this.bvy += 0.14 * r.s * dt; this.bx += this.bvx * dt; this.by += this.bvy * dt;
-    if (this.phase !== 'crashing') this.bvx = (3.2 + this.mult * 0.85) * r.s;
+    if (this.phase !== 'crashing') this.bvx = (this.phase === 'flying' && this.flyVx != null) ? this.flyVx : (3.2 + this.mult * 0.85) * r.s;
     if (this.by >= r.gY) {
       this.by = r.gY;
       if (this.phase === 'flying') {
         this.bvx = 0; this.bvy = 0;
-        this.actualDist = this.toMeters(this.bx, r);
+        if (this.landDist != null) {
+          // Snap to the server's landing spot (frame timing can leave it a
+          // pixel or two off), so the distance shown is the one decided.
+          this.bx = r.P2.x + this.mToPx(this.landDist, r);
+          this.actualDist = this.landDist;
+        } else {
+          this.actualDist = this.toMeters(this.bx, r);
+        }
         this.pendingCrash = false;
         this.phase = 'crashing';
-        // The crowd's reaction is scaled off how close the landing was to the
-        // player's own prediction — an approximation of "was that a good
-        // round" that stays purely cosmetic (App.jsx/logic.js remain the only
-        // source of truth for the actual payout).
-        const errPct = Math.abs(this.actualDist - this.pred) / Math.max(this.actualDist, 1);
-        this.cheer = Math.max(0, 1 - errPct / 0.3);
+        // The crowd goes wild when the bike reaches the player's pick (a won
+        // bet) and stays quiet when it falls short. Purely cosmetic: the
+        // server has already decided and paid the round.
+        this.cheer = this.landDist != null
+          ? (this.actualDist >= this.pred ? 1 : 0)
+          : Math.max(0, 1 - (Math.abs(this.actualDist - this.pred) / Math.max(this.actualDist, 1)) / 0.3);
         this.landCheer = this.cheer; // undecayed, for the pyro/fireworks show
         this.landedGood = this.cheer > 0;
         this.spawnParticles(this.cheer);

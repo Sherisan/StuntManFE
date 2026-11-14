@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import MainMenu from './MainMenu.jsx';
 import BetSlip from './components/BetSlip.jsx';
-import { AccuracyBar, SessionCard, RecentRounds, PayoutRules } from './components/InfoPanels.jsx';
+import { SessionCard, RecentRounds, PayoutRules } from './components/InfoPanels.jsx';
 import { BikeGame } from './game/BikeGame.js';
-import { calcPayout, PAYOUT_TIERS } from './game/logic.js';
-import { playWin, playLose, playDeposit, playWithdraw, playCountdownBeep, playClick, playBet, gameSfx, unlockAudio, setSoundEnabled, setMusicEnabled } from './game/sound.js';
+import { PAYOUT_TIERS, DEFAULT_MAX_MULT, clampPred, targetForPred, landingDist, multAtDist, fmtMult, floorCents } from './game/logic.js';
+import { playWin, playLose, playCountdownBeep, playClick, playBet, gameSfx, unlockAudio, setSoundEnabled, setMusicEnabled } from './game/sound.js';
+import * as api from './api/engine.js';
 
-const START_BALANCE = 1000;
 const BET_KEY = 'bikeit_bet';
 const PRED_KEY = 'bikeit_pred';
 const BET2_KEY = 'bikeit_bet2';
@@ -47,8 +47,15 @@ export default function App() {
   const canvasRef = useRef(null);
   const gameRef = useRef(null);
 
+  // ── Game server (GameEngineAPI) ────────────────────────────────────────────
+  // The balance is the player's real wallet balance and every round is
+  // decided and paid by the server; see api/engine.js.
+  const [server, setServer] = useState({ status: 'connecting', error: null, info: null });
+  const maxMult = Number(server.info?.maxTarget) || DEFAULT_MAX_MULT;
+  const ready = server.status === 'ready';
+
   // ── Core game state (React-owned) ──────────────────────────────────────────
-  const [balance, setBalance] = useState(START_BALANCE);
+  const [balance, setBalance] = useState(0);
   const [roundNum, setRoundNum] = useState(1);
   const [betInput, setBetInput] = useState(() => localStorage.getItem(BET_KEY) || '10');
   const [predInput, setPredInput] = useState(() => localStorage.getItem(PRED_KEY) || '80');
@@ -59,10 +66,6 @@ export default function App() {
   const [history, setHistory] = useState([]);
   const [sessionStats, setSessionStats] = useState({ wagered: 0, returned: 0, wins: 0, rounds: 0, bets: 0 });
   const [streak, setStreak] = useState({ type: null, current: 0, best: 0 });
-  const [walletInput, setWalletInput] = useState('100');
-  const [walletMode, setWalletMode] = useState(null);       // null | 'deposit' | 'withdraw' — drives the wallet popup
-  const [walletFeedback, setWalletFeedback] = useState(null); // { type, amount } shown as the popup's success state
-  const walletCloseTimerRef = useRef(null);
 
   // ── Mobile single-column layout: which info tab shows under the bet slip ──
   const [tab, setTab] = useState('stats'); // 'stats' | 'rules'
@@ -121,7 +124,7 @@ export default function App() {
   const [distance, setDistance] = useState('— m');
   const [predDisplay, setPredDisplay] = useState('— m');
   const [distLabel, setDistLabel] = useState('Predict & Bet to Race');
-  const [statusMsg] = useState('');
+  const [statusMsg, setStatusMsg] = useState('');
   // Speed/height are pushed by the game loop's onStats callback on every rAF
   // tick during flight (~60/s). Routing that through React state would force
   // a full App re-render every frame (App renders a large tree — history,
@@ -147,6 +150,9 @@ export default function App() {
   const predRoundRef = useRef(80);
   const bet2ActiveRoundRef = useRef(false);
   const bet2RoundRef = useRef(0);
+  // The server's verdict for the round in the air: { crashPoint, target, win, balance, winPending, proof }.
+  // It's known before take-off but only shown (and the balance updated) on landing.
+  const playRef = useRef(null);
   const statsRef = useRef({ wagered: 0, returned: 0, wins: 0, rounds: 0, bets: 0 });
   const autoRef = useRef({ active: false, roundsLeft: 0, stopLoss: null, stopProfit: null, startWagered: 0, startReturned: 0 });
   useEffect(() => { balanceRef.current = balance; }, [balance]);
@@ -155,32 +161,33 @@ export default function App() {
   const bumpBalance = () => setBumpKey(k => k + 1);
 
   // ── Round outcome resolution ───────────────────────────────────────────────
-  // Bet 2 (when active) rides the same prediction as Bet 1 — just a second,
-  // independent stake — so both share the same accuracy/tier and only the
-  // payout amount differs.
+  // Runs when the bike lands. Everything here comes from the server's play
+  // result: both bets ride one target and were placed as one stake, so the
+  // server's single win is split between the two slips for display.
   const resolveOutcome = useCallback((dist) => {
+    const p = playRef.current;
+    if (!p) return;
+    playRef.current = null;
     const pred1 = predRoundRef.current;
     const bet1 = betRoundRef.current;
-    const r1 = calcPayout(dist, pred1);
-    const won1 = r1.mult > 0;
-    const payout1 = +(bet1 * r1.mult).toFixed(2);
-    const errPct = r1.errPct;
-
+    const won1 = p.win > 0;
     const bet2Active = bet2ActiveRoundRef.current;
     const bet2 = bet2Active ? bet2RoundRef.current : 0;
-    const payout2 = bet2Active ? +(bet2 * r1.mult).toFixed(2) : 0;
+    const totalPayout = p.win;
+    const payout1 = won1 ? (bet2Active ? floorCents(bet1 * p.target) : totalPayout) : 0;
+    const payout2 = won1 && bet2Active ? +(totalPayout - payout1).toFixed(2) : 0;
 
-    const totalPayout = payout1 + payout2;
-
-    if (totalPayout > 0) setBalance(b => b + totalPayout);
-    if (soundOnRef.current) { if (won1) playWin(r1.mult); else playLose(); }
+    if (p.balance != null) setBalance(p.balance);
+    else if (totalPayout > 0) setBalance(b => b + totalPayout);
+    if (soundOnRef.current) { if (won1) playWin(p.target); else playLose(); }
     vibrate(won1 ? [20, 40, 20] : 60);
     bumpBalance();
 
     const now = Date.now();
     setHistory(h => {
-      const entries = [{ won: won1, mult: r1.mult, dist, bet: bet1, payout: payout1, pred: pred1, time: now }];
-      if (bet2Active) entries.push({ won: won1, mult: r1.mult, dist, bet: bet2, payout: payout2, pred: pred1, time: now });
+      const base = { won: won1, mult: p.target, crash: p.crashPoint, dist, pred: pred1, time: now, roundId: p.roundId };
+      const entries = [{ ...base, bet: bet1, payout: payout1 }];
+      if (bet2Active) entries.push({ ...base, bet: bet2, payout: payout2 });
       return [...entries, ...h].slice(0, 30);
     });
 
@@ -215,12 +222,36 @@ export default function App() {
 
     setResult({
       dist,
+      crash: p.crashPoint,
+      winPending: p.winPending,
+      proof: p.proof,
       slips: [
-        { tier: r1.tier, won: won1, pm: r1.mult, payout: payout1, pred: pred1, bet: bet1, errPct },
-        ...(bet2Active ? [{ tier: r1.tier, won: won1, pm: r1.mult, payout: payout2, pred: pred1, bet: bet2, errPct }] : []),
+        { won: won1, pm: p.target, payout: payout1, pred: pred1, bet: bet1 },
+        ...(bet2Active ? [{ won: won1, pm: p.target, payout: payout2, pred: pred1, bet: bet2 }] : []),
       ],
     });
   }, []);
+
+  // ── Connect to the game server and load the wallet balance ────────────────
+  const refreshBalance = useCallback(async () => {
+    const b = await api.getBalance();
+    setBalance(Number(b.balance));
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const info = await api.connect();
+        await refreshBalance();
+        if (!alive) return;
+        setServer({ status: 'ready', error: null, info });
+        setPredInput(p => String(clampPred(p, Number(info?.maxTarget) || DEFAULT_MAX_MULT)));
+      } catch (e) {
+        if (alive) setServer({ status: 'error', error: e.message, info: null });
+      }
+    })();
+    return () => { alive = false; };
+  }, [refreshBalance]);
 
   // ── Engine setup ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -346,43 +377,7 @@ export default function App() {
   const halveBet2 = () => setBet2(Math.max(1, Math.floor(numericBet2() / 2)));
   const doubleBet2 = () => setBet2(numericBet2() * 2);
 
-  // ── Wallet (demo balance top-up/cash-out via a themed pit-stop popup — no
-  // real payment backend here; deposit/withdraw only ever touch local state) ─
-  const walletAmt = Math.max(1, parseFloat(walletInput) || 0);
-  const walletOverBalance = walletMode === 'withdraw' && walletAmt > balance;
-
-  const openWallet = (mode) => {
-    clearTimeout(walletCloseTimerRef.current);
-    setWalletFeedback(null);
-    setWalletMode(mode);
-    setWalletInput(mode === 'withdraw' ? String(Math.max(1, Math.min(100, Math.floor(balance)) || 1)) : '100');
-  };
-  const closeWallet = () => {
-    clearTimeout(walletCloseTimerRef.current);
-    setWalletMode(null);
-    setWalletFeedback(null);
-  };
-  const confirmWallet = () => {
-    if (walletMode === 'deposit') {
-      setBalance(b => b + walletAmt);
-      bumpBalance();
-      if (soundOnRef.current) playDeposit();
-      vibrate(15);
-      setWalletFeedback({ type: 'deposit', amount: walletAmt });
-    } else if (walletMode === 'withdraw') {
-      if (balance <= 0) return;
-      const amt = Math.min(walletAmt, balance);
-      setBalance(b => Math.max(0, b - amt));
-      bumpBalance();
-      if (soundOnRef.current) playWithdraw();
-      vibrate(15);
-      setWalletFeedback({ type: 'withdraw', amount: amt });
-    }
-    walletCloseTimerRef.current = setTimeout(closeWallet, 1700);
-  };
-  useEffect(() => () => clearTimeout(walletCloseTimerRef.current), []);
-
-  // ── Settings actions (local-only resets; no server calls) ─────────────────
+  // ── Settings actions ───────────────────────────────────────────────────────
   const resetSession = () => {
     const empty = { wagered: 0, returned: 0, wins: 0, rounds: 0, bets: 0 };
     statsRef.current = empty;
@@ -396,7 +391,7 @@ export default function App() {
     setAutoRun(r => ({ ...r, startWagered: 0, startReturned: 0 }));
     setAutoStopReason(null);
   };
-  const resetBalance = () => { setBalance(START_BALANCE); bumpBalance(); };
+  const reloadBalance = () => { refreshBalance().then(bumpBalance).catch((e) => setStatusMsg(e.message)); };
 
   // ── Stakes for the next round ──────────────────────────────────────────────
   // What a round would actually place right now. With too little balance to
@@ -423,10 +418,16 @@ export default function App() {
   const overBalance = Math.max(0, parseFloat(betInput) || 0) + Math.max(0, parseFloat(bet2Input) || 0) > balance;
 
   // ── Start round ────────────────────────────────────────────────────────────
-  const startRound = () => {
-    if (balance < 1) return; // can't cover even the R1 minimum bet
+  // Both bets go to the server as ONE play (one stake, one target), so they
+  // share a single crash point the way they share one bike. The server takes
+  // the stake, draws the crash point, pays any win and returns the verdict;
+  // the bike then flies to that crash point's distance.
+  const startRound = async () => {
+    if (!ready || balance < 1) return; // no server, or can't cover the R1 minimum bet
     const { bet1, bet2, bet2Active } = fitBets();
-    const pred1 = Math.max(5, parseFloat(predInput) || 80);
+    const pred1 = clampPred(predInput, maxMult);
+    const target = targetForPred(pred1, maxMult);
+    const stakeTotal = +(bet1 + bet2).toFixed(2);
 
     setBetInput(String(bet1));
     setPredInput(String(pred1));
@@ -437,17 +438,47 @@ export default function App() {
     bet2ActiveRoundRef.current = bet2Active;
     bet2RoundRef.current = bet2;
 
-    setBalance(b => b - (bet1 + bet2));
+    setPhase('countdown');            // disables the button immediately
+    setStatusMsg('');
+
+    let res;
+    try {
+      res = await api.play(stakeTotal, target);
+    } catch (e) {
+      setPhase('idle');
+      setStatusMsg(e.message);
+      refreshBalance().catch(() => {}); // re-sync in case the wallet moved
+      if (autoRef.current.active) {
+        autoRef.current.active = false;
+        setAutoActive(false);
+        setAutoRoundsLeft(0);
+        setAutoStopReason(`Stopped: ${e.message}`);
+      }
+      return;
+    }
+
+    const crashPoint = Number(res.crashPoint);
+    const won = Number(res.win) > 0;
+    playRef.current = {
+      roundId: res.roundId, crashPoint, target, win: Number(res.win),
+      balance: res.balance != null ? Number(res.balance) : null,
+      winPending: !!res.winPending, proof: res.proof,
+    };
+
+    // Show the stake leaving the balance now; the server's balance (with any
+    // win) replaces it when the bike lands.
+    setBalance(b => b - stakeTotal);
     bumpBalance();
     vibrate(15);
-    setPhase('countdown');            // disables the button immediately
     setPredDisplay(pred1 + ' m');
     setDistance('— m');
 
     if (soundOnRef.current) playBet();
 
-    // The engine rolls this launch's outcome with its own random generator
-    gameRef.current.startRound({ pred: pred1, roundNum: roundNumRef.current });
+    gameRef.current.startRound({
+      pred: pred1, roundNum: roundNumRef.current,
+      crashAt: crashPoint, landDist: landingDist(crashPoint, pred1, won),
+    });
   };
 
   const handleMain = () => { if (phase === 'idle') startRound(); };
@@ -478,7 +509,7 @@ export default function App() {
   // carries on, while the balance covers both in full.
   const autoBet1 = Math.max(1, Math.min(balance, parseFloat(betInput) || 10));
   const autoBet2 = Math.max(1, parseFloat(bet2Input) || 10);
-  const autoCanStart = phase === 'idle' && !autoActive && autoBet1 + autoBet2 <= balance;
+  const autoCanStart = ready && phase === 'idle' && !autoActive && autoBet1 + autoBet2 <= balance;
   const autoNet = (sessionStats.returned - autoRun.startReturned) - (sessionStats.wagered - autoRun.startWagered);
 
   const startAuto = () => {
@@ -513,22 +544,25 @@ export default function App() {
     || (autoRef.current.stopProfit != null && autoNet >= autoRef.current.stopProfit)
     || autoBet1 + autoBet2 > balance);
 
-  // Live payout zone while the bike is in the air — distance only climbs, so
-  // the readout walks Miss → Close → Great → Bullseye and back out, showing
-  // the player exactly when their pick is in play.
+  // Live crash readout while the bike is in the air: the multiplier climbs
+  // with the distance, and flips to "made it" once it passes the pick.
   const liveDist = parseFloat(distance);
   const livePred = parseFloat(predDisplay);
-  const liveZone = phase === 'flying' && liveDist > 0 && livePred > 0 ? calcPayout(liveDist, livePred) : null;
+  const liveZone = phase === 'flying' && liveDist >= 0 && livePred > 0
+    ? { mult: multAtDist(liveDist), made: liveDist >= livePred, target: targetForPred(livePred, maxMult) }
+    : null;
 
-  // Both bets ride the same pick, so a round has one tier/accuracy and only
-  // the amounts differ — the result card shows that once, then each bet.
+  // Both bets ride the same pick, so a round has one result and only the
+  // amounts differ — the result card shows that once, then each bet.
   const resultHead = result?.slips[0];
   const resultNet = result ? result.slips.reduce((n, s) => n + s.payout - s.bet, 0) : 0;
 
   // balance < 1 blocks betting outright — startRound() floors any bet at a
   // minimum of R1, so without this a R0 balance could still place a bet and
-  // go negative.
-  const betDisabled = phase !== 'idle' || autoActive || balance < 1;
+  // go negative. No server connection, no betting.
+  const betDisabled = !ready || phase !== 'idle' || autoActive || balance < 1;
+  const serverNote = server.status === 'connecting' ? 'Connecting to the game server…'
+    : server.status === 'error' ? server.error : '';
 
   return (
     <div className="phone-frame">
@@ -588,13 +622,13 @@ export default function App() {
               </div>
               <div id="distLabel">{distLabel}</div>
               {liveZone && (
-                <div className={`live-zone z-${liveZone.mult >= 8 ? 'top' : liveZone.mult >= 3 ? 'great' : liveZone.mult > 0 ? 'close' : liveDist < livePred ? 'early' : 'over'}`}>
-                  {liveZone.mult > 0
-                    ? <>{liveZone.tier} <b>{liveZone.mult}×</b></>
-                    : liveDist < livePred ? <>{Math.round(livePred - liveDist)}m to your pick</> : <>Past your pick</>}
+                <div className={`live-zone z-${liveZone.made ? 'great' : 'early'}`}>
+                  {liveZone.made
+                    ? <>✅ Made it · <b>{fmtMult(liveZone.target)}</b></>
+                    : <><b>{fmtMult(liveZone.mult)}</b> · {Math.round(livePred - liveDist)}m to your pick</>}
                 </div>
               )}
-              <div id="statusMsg">{statusMsg}</div>
+              <div id="statusMsg">{statusMsg || serverNote}</div>
             </div>
 
             <div className={`fstats${statsShow ? ' show' : ''}`}>
@@ -627,6 +661,7 @@ export default function App() {
               setPred={setPred} onKeyDown={handleBetKeyDown}
               stake={stake} overBalance={overBalance}
               phase={phase} betDisabled={betDisabled} onPlaceBet={handleMain}
+              maxMult={maxMult} serverNote={serverNote}
               auto={{
                 active: autoActive, canStart: autoCanStart, onStart: startAuto, onStop: stopAuto,
                 rounds: autoRoundsInput, setRounds: setAutoRoundsInput,
@@ -657,17 +692,19 @@ export default function App() {
 
       {result && (
         <div id="resultOverlay">
-          <div id="resultBox" className={!resultHead.won ? 'is-loss' : resultHead.pm >= 8 ? 'is-top' : 'is-win'}>
+          <div id="resultBox" className={!resultHead.won ? 'is-loss' : resultHead.pm >= 10 ? 'is-top' : 'is-win'}>
             <div className="result-kicker">Round {roundNum} result</div>
-            <div className="result-title">{resultHead.tier}</div>
+            <div className="result-title">{resultHead.won ? `🏁 MADE IT · ${fmtMult(resultHead.pm)}` : '💥 CRASHED SHORT'}</div>
             <div className="result-facts">
+              <div><span>Crashed at</span><b>{fmtMult(result.crash)}</b></div>
               <div><span>Landed</span><b>{result.dist}m</b></div>
-              <div><span>Your pick</span><b>{resultHead.pred}m</b></div>
-              <div><span>Off by</span><b>{resultHead.errPct}%</b></div>
+              <div><span>Your pick</span><b>{resultHead.pred}m · {fmtMult(resultHead.pm)}</b></div>
             </div>
-            <AccuracyBar markerPct={resultHead.errPct} compact />
-            {!resultHead.won && resultHead.errPct <= 40 && (
-              <div className="near-miss">😬 So close — only {resultHead.errPct - 30}% outside the Close Enough zone.</div>
+            {!resultHead.won && resultHead.pred - result.dist <= Math.max(5, resultHead.pred * 0.1) && (
+              <div className="near-miss">😬 So close — only {resultHead.pred - result.dist}m short of your pick.</div>
+            )}
+            {result.winPending && (
+              <div className="near-miss">⏳ Payout delayed — your win is recorded and will be paid shortly.</div>
             )}
             <div className="result-bets">
               {result.slips.map((s, i) => (
@@ -698,14 +735,13 @@ export default function App() {
           <div className="modal-box" onClick={e => e.stopPropagation()}>
             <h3>🏍 How Bike It Works</h3>
             <div className="steps">
-              <div className="modal-step"><span className="num">1</span> Set your bet amount and predict how far (in meters) the bike will fly off the ramp.</div>
-              <div className="modal-step"><span className="num">2</span> Place your bet — the bike races down the ramp and launches off the jump.</div>
-              <div className="modal-step"><span className="num">3</span> The landing distance is decided by the game's cryptographic random number generator.</div>
-              <div className="modal-step"><span className="num">4</span> Your payout depends on how close your prediction was to where it actually landed — closer is worth more.</div>
+              <div className="modal-step"><span className="num">1</span> Set your bet and pick a landing distance. Every distance has a multiplier: the further the pick, the bigger it is ({PAYOUT_TIERS.map(t => `${t.dist}m = ${fmtMult(t.mult)}`).join(', ')}).</div>
+              <div className="modal-step"><span className="num">2</span> Place your bet. The game server takes the stake and its provably fair RNG draws the round's crash point.</div>
+              <div className="modal-step"><span className="num">3</span> The bike launches and the multiplier climbs with the distance until it crashes at that crash point.</div>
+              <div className="modal-step"><span className="num">4</span> Land at or past your pick and you win your bet × your pick's multiplier. Fall short and the bet is lost.</div>
             </div>
 
-            <div className="modal-subhead">Accuracy → Payout</div>
-            <AccuracyBar />
+            <div className="modal-subhead">Pick → Payout</div>
             <div className="tier-table">
               {PAYOUT_TIERS.map(t => (
                 <div key={t.key} className={`tier-row t-${t.key}`}>
@@ -714,94 +750,26 @@ export default function App() {
                     <span className="tier-label">{t.label}</span>
                     <span className="tier-range">{t.range}</span>
                   </div>
-                  <div className="tier-end"><span className="tier-mult">{t.mult}×</span></div>
+                  <div className="tier-end"><span className="tier-mult">{fmtMult(t.mult)}</span></div>
                 </div>
               ))}
               <div className="tier-row t-miss">
                 <span className="tier-icon">❌</span>
                 <div className="tier-mid">
-                  <span className="tier-label">Missed It</span>
-                  <span className="tier-range">Beyond 30%</span>
+                  <span className="tier-label">Crash before your pick</span>
+                  <span className="tier-range">Bet lost</span>
                 </div>
                 <div className="tier-end"><span className="tier-mult">—</span></div>
               </div>
             </div>
 
             <div className="modal-example">
-              💡 <b>Example:</b> you predict <b>100m</b>, the bike lands at <b>104m</b> — that's 4% off, inside the
-              Bullseye zone, so a R10 bet pays <b>R80</b> (8×).
+              💡 <b>Example:</b> you pick <b>100m</b> ({fmtMult(targetForPred(100, maxMult))}). The crash point lands the bike at
+              <b> 112m</b>, so a R10 bet pays <b>R{(10 * targetForPred(100, maxMult)).toFixed(2)}</b>. Return to player is 96%, and the
+              most you can pick is {fmtMult(maxMult)}.
             </div>
 
             <button className="modal-close" onClick={() => setShowRules(false)}>Got It</button>
-          </div>
-        </div>
-      )}
-
-      {walletMode && (
-        <div className="modal-overlay wallet-modal-overlay" onClick={closeWallet}>
-          <div className={`wallet-modal wm-${walletMode}`} onClick={e => e.stopPropagation()}>
-            {!walletFeedback ? (
-              <>
-                <div className="wm-head">
-                  <h3><span className="wm-flag">🏁</span> Pit Stop</h3>
-                  <button type="button" className="wm-close" aria-label="Close" onClick={closeWallet}>×</button>
-                </div>
-
-                <div className="wm-tabs">
-                  <button type="button" className={walletMode === 'deposit' ? 'active' : ''} onClick={() => openWallet('deposit')}>
-                    ⛽ Deposit
-                  </button>
-                  <button type="button" className={walletMode === 'withdraw' ? 'active' : ''} disabled={balance <= 0}
-                    onClick={() => openWallet('withdraw')}>
-                    🏆 Withdraw
-                  </button>
-                </div>
-
-                <div className="wm-balance">
-                  <span>Current Balance</span>
-                  <b>R{balance.toFixed(2)}</b>
-                </div>
-
-                <div className="input-currency wm-input">
-                  <span className="prefix">R</span>
-                  <input type="number" inputMode="decimal" autoFocus value={walletInput} min="1" step="1"
-                    onChange={e => setWalletInput(e.target.value)} />
-                </div>
-
-                <div className="quick wm-quick">
-                  {[50, 100, 250, 500, 1000].map(v => (
-                    <button key={v} type="button" className={walletInput === String(v) ? 'active' : ''}
-                      onClick={() => setWalletInput(String(v))}>R{v}</button>
-                  ))}
-                  {walletMode === 'withdraw' && (
-                    <button type="button" onClick={() => setWalletInput(String(Math.max(1, Math.floor(balance))))}>MAX</button>
-                  )}
-                </div>
-
-                {walletOverBalance && (
-                  <div className="bet-warning">⚠ Exceeds balance — will cash out R{balance.toFixed(2)}</div>
-                )}
-
-                <button type="button" className={`wm-confirm wm-confirm-${walletMode}`}
-                  onClick={confirmWallet} disabled={walletMode === 'withdraw' && balance <= 0}>
-                  {walletMode === 'deposit'
-                    ? `⛽ Deposit R${walletAmt.toFixed(0)}`
-                    : `🏁 Withdraw R${Math.min(walletAmt, balance).toFixed(0)}`}
-                </button>
-              </>
-            ) : (
-              <div className="wm-success">
-                <div className="wm-success-icon">{walletFeedback.type === 'deposit' ? '⛽' : '🏁'}</div>
-                <div className="wm-success-title">
-                  {walletFeedback.type === 'deposit' ? 'Tank Full!' : 'Cashed Out!'}
-                </div>
-                <div className={`wm-success-amt wm-success-amt-${walletFeedback.type}`}>
-                  {walletFeedback.type === 'deposit' ? '+' : '−'}R{walletFeedback.amount.toFixed(2)}
-                </div>
-                <div className="wm-success-bal">New Balance <b>R{balance.toFixed(2)}</b></div>
-                <button type="button" className="wm-done" onClick={closeWallet}>Done</button>
-              </div>
-            )}
           </div>
         </div>
       )}
@@ -873,8 +841,8 @@ export default function App() {
                           <span>{h.won ? `+R${h.payout.toFixed(2)}` : `-R${h.bet.toFixed(2)}`}</span>
                         </div>
                         <div className="bet-slip-row bet-slip-sub">
-                          <span>Pick {h.pred}m · Landed {h.dist}m</span>
-                          <span>{h.won ? `${h.mult}×` : 'Lost'}</span>
+                          <span>Pick {h.pred}m · Crashed {h.crash != null ? fmtMult(h.crash) : '—'} · Landed {h.dist}m</span>
+                          <span>{h.won ? fmtMult(h.mult) : 'Lost'}</span>
                         </div>
                         {h.time && <div className="bet-slip-time">{new Date(h.time).toLocaleString()}</div>}
                       </div>
@@ -898,40 +866,34 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="flbl">Wallet</div>
-                    <div className="wallet-actions">
-                      <button type="button" className="wallet-btn wallet-deposit" onClick={() => openWallet('deposit')}>
-                        <span className="wallet-btn-icon">⛽</span> Deposit
-                      </button>
-                      <button type="button" className="wallet-btn wallet-withdraw" onClick={() => openWallet('withdraw')} disabled={balance <= 0}>
-                        <span className="wallet-btn-icon">🏁</span> Withdraw
-                      </button>
-                    </div>
-
                     <div className="settings-actions">
                       <button type="button" className="settings-btn" onClick={resetSession}>Reset Session Stats</button>
-                      <button type="button" className="settings-btn settings-btn-danger" onClick={resetBalance}>
-                        Reset Balance to R{START_BALANCE}
-                      </button>
+                      <button type="button" className="settings-btn" onClick={reloadBalance} disabled={!ready}>Refresh Balance</button>
                     </div>
-                    <div className="account-note">This is a local demo account — everything above lives only in this browser. There's no server-side account.</div>
+                    <div className="account-note">Your balance is your wallet on the game server. Deposits and withdrawals happen in the lobby. The stats above are kept in this browser only.</div>
                   </>
                 )}
 
                 {settingsPage === 'privacy' && (
                   <div className="legal-text">
-                    <p><b>Demo notice.</b> Bike It is a practice/demo prediction game. No real money is wagered, deposited, or withdrawn — every "R" balance, deposit, and withdrawal here is simulated and stored only in this browser.</p>
-                    <p><b>Data.</b> No personal data is collected or transmitted. Your bet size, prediction, sound preference and local player ID live only in this browser's storage. The only network call this game makes is fetching a provably-fair round outcome to drive the flight.</p>
-                    <p><b>No warranty.</b> Provided for entertainment/demo purposes only, with no guarantee of uptime, accuracy, or fitness for any particular purpose.</p>
-                    <p><b>Responsible play.</b> Even in demo form, Bike It is modeled on real-money prediction games — keep it fun, set limits, and never chase losses.</p>
+                    <p><b>Your wallet.</b> Bets are taken from, and wins paid into, the wallet of the session you launched the game with. Every round is decided and settled by the game server.</p>
+                    <p><b>Data.</b> The game sends the server your stake and your pick each round. Your bet size, prediction, sound preference and session stats are also kept in this browser's storage.</p>
+                    <p><b>No warranty.</b> Provided with no guarantee of uptime, accuracy, or fitness for any particular purpose.</p>
+                    <p><b>Responsible play.</b> Keep it fun, set limits, and never chase losses.</p>
                   </div>
                 )}
 
                 {settingsPage === 'about' && (
                   <div className="legal-text">
-                    <p><b>Bike It</b> — a provably-fair-flavored motocross distance-prediction game.</p>
-                    <p>Version 1.0.0 · Built with React + Canvas.</p>
-                    <p>Each round's outcome comes from a cryptographic random number generator in the game.</p>
+                    <p><b>Bike It</b> — a motocross crash game.</p>
+                    <p>Version 1.1.0 · Built with React + Canvas.</p>
+                    <p>Each round's crash point is drawn by the game server's provably fair RNG (96% return to player). The hash of the server seed is published before play, and the seed is revealed when it rotates so past rounds can be checked.</p>
+                    {server.info?.fairness && (
+                      <p className="mono-sm">Current seed hash: {server.info.fairness.currentServerSeedHash}</p>
+                    )}
+                    {result?.proof && (
+                      <p className="mono-sm">Last round: seed hash {result.proof.serverSeedHash} · client seed {result.proof.clientSeed} · nonce {result.proof.nonce}</p>
+                    )}
                   </div>
                 )}
               </>

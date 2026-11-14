@@ -1,41 +1,4 @@
-import { PAYOUT_TIERS } from '../game/logic.js';
-
-// Visualizes the payout ladder as zones along an error-percentage axis, so the
-// tier table's numbers ("within 5%", "8×") read as one glanceable shape instead
-// of rows to cross-reference. `markerPct` (when given) plots where a round's
-// actual error landed, tying a specific result back to the rule that paid it.
-export function AccuracyBar({ markerPct, compact }) {
-  const zones = [];
-  let prev = 0;
-  for (const t of PAYOUT_TIERS) {
-    zones.push({ key: t.key, icon: t.icon, mult: t.mult, from: prev, to: t.maxErr * 100 });
-    prev = t.maxErr * 100;
-  }
-  const missSpan = prev * 0.6;
-  zones.push({ key: 'miss', icon: '❌', mult: 0, from: prev, to: prev + missSpan });
-  const total = prev + missSpan;
-
-  return (
-    <div className={'accuracy-bar' + (compact ? ' compact' : '')}>
-      <div className="accuracy-track">
-        {zones.map(z => (
-          <div key={z.key} className={`accuracy-zone az-${z.key}`} style={{ flexGrow: z.to - z.from }}>
-            <span className="az-icon">{z.icon}</span>
-            {!compact && <span className="az-mult">{z.mult > 0 ? `${z.mult}×` : '—'}</span>}
-          </div>
-        ))}
-        {markerPct != null && (
-          <div className="accuracy-marker" style={{ left: `${Math.min(markerPct, total) / total * 100}%` }} />
-        )}
-      </div>
-      <div className="accuracy-scale">
-        <span>0%</span>
-        {PAYOUT_TIERS.map(t => <span key={t.key}>{Math.round(t.maxErr * 100)}%</span>)}
-        <span>{Math.round(total)}%+</span>
-      </div>
-    </div>
-  );
-}
+import { PAYOUT_TIERS, fmtMult } from '../game/logic.js';
 
 const money = (v) => `R${v.toFixed(2)}`;
 
@@ -70,9 +33,9 @@ export function RecentRounds({ history }) {
       {rounds.length === 0 && <div className="info-empty">Your results will show up here.</div>}
       <div className="recent-grid">
         {rounds.map((r) => (
-          <div key={r.time} className={'recent-chip ' + (!r.won ? 'is-miss' : r.mult >= 8 ? 'is-top' : r.mult >= 3 ? 'is-great' : 'is-win')}>
-            <b>{r.won ? `${r.mult}×` : 'Miss'}</b>
-            <span>{r.dist}m · pick {r.pred}m</span>
+          <div key={r.time} className={'recent-chip ' + (!r.won ? 'is-miss' : r.mult >= 10 ? 'is-top' : r.mult >= 3 ? 'is-great' : 'is-win')}>
+            <b>{r.crash != null ? fmtMult(r.crash) : '—'}</b>
+            <span>{r.won ? 'Won' : 'Crashed'} · {r.dist}m / {r.pred}m</span>
           </div>
         ))}
         {/* Empty slots keep the grid's shape until it fills up */}
@@ -91,7 +54,7 @@ export function PayoutRules({ onInfo }) {
         <span className="info-title">Payout rules</span>
         <button type="button" className="info-btn" aria-label="How Bike It works" onClick={onInfo}>?</button>
       </div>
-      <AccuracyBar />
+      <p className="info-empty">Pick a landing distance. Each one has a multiplier. Land at or past it and win stake × multiplier.</p>
       <div className="tier-table">
         {PAYOUT_TIERS.map(t => (
           <div key={t.key} className={`tier-row t-${t.key}`}>
@@ -100,14 +63,14 @@ export function PayoutRules({ onInfo }) {
               <span className="tier-label">{t.label}</span>
               <span className="tier-range">{t.range}</span>
             </div>
-            <div className="tier-end"><span className="tier-mult">{t.mult}×</span></div>
+            <div className="tier-end"><span className="tier-mult">{fmtMult(t.mult)}</span></div>
           </div>
         ))}
         <div className="tier-row t-miss">
           <span className="tier-icon">❌</span>
           <div className="tier-mid">
-            <span className="tier-label">Missed It</span>
-            <span className="tier-range">Beyond 30%</span>
+            <span className="tier-label">Crash before your pick</span>
+            <span className="tier-range">Bet lost</span>
           </div>
           <div className="tier-end"><span className="tier-mult">—</span></div>
         </div>
