@@ -104,6 +104,26 @@ export default function App() {
   }, [musicOn]);
   useEffect(() => () => setMusicEnabled(false), []);
 
+  // Portrait phones size the game to the space the header and the bet slip
+  // leave (see index.css), so the whole slip sits at the bottom of the
+  // screen. Their heights change with the Manual/Auto tab, so measure them.
+  const appRef = useRef(null);
+  useEffect(() => {
+    const app = appRef.current;
+    const header = app?.querySelector(':scope > header');
+    const slip = app?.querySelector('.side-right .slip');
+    if (!app || !header || !slip || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      app.style.setProperty('--hdr-h', `${header.offsetHeight}px`);
+      app.style.setProperty('--slip-h', `${slip.offsetHeight}px`);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(header);
+    ro.observe(slip);
+    measure();
+    return () => ro.disconnect();
+  }, []);
+
   const [playerId] = useState(getOrCreatePlayerId);
   const [joinedAt] = useState(getOrCreateJoinedAt);
   const [lifetimeStats, setLifetimeStats] = useState(loadLifetimeStats);
@@ -578,7 +598,7 @@ export default function App() {
           onSettings={() => setShowSettings(true)}
         />
       )}
-      <div className="app">
+      <div className="app" ref={appRef}>
         <header>
           <div className="logo"><span className="spark">⚡</span><span className="logo-word">BIKE <b>IT</b></span></div>
           <div className="balance-wrap">

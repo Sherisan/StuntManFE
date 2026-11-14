@@ -475,6 +475,7 @@ input[type=number]:disabled { opacity:.5; }
 .slip-cta.is-auto { --c1:#FFC14D; --c2:#FF8A1F; --glow:255,170,51; --ink:#1E0E00; }
 .slip-cta.is-stop { --c1:#FF6B7F; --c2:#E02D4C; --glow:255,92,122; --ink:#fff; }
 .slip-cta:focus-visible { outline:3px solid #fff; outline-offset:3px; }
+.slip-cta-odds { display:none; }
 .slip-warn { font-size:11px; line-height:1.4; color:#FF8A9A; padding:0 2px; }
 .slip-hint { font-size:11px; line-height:1.4; color:var(--dim); text-align:center; }
 
@@ -902,11 +903,57 @@ input[type=number]:disabled { opacity:.5; }
   .game-wrap { height:min(100vw, 38dvh); }
   .slip-range { height:28px; }
 }
-/* Portrait phones: the header and the game fill the top 80% of the screen
-   and the bet slip starts below them — scroll down to it. The bet button
-   stays pinned to the bottom edge, so placing a bet is still one tap away. */
+/* Portrait phones and tablets: the game takes the space the header and the
+   bet slip leave, so the whole slip — Manual/Auto, the predicted landing,
+   the stakes and the bet button — sits at the bottom of the first screen.
+   App.jsx measures --hdr-h and --slip-h; the 20px is .side-right's
+   padding. The game never gets shorter than 30% of the screen, and the
+   Session / Payout rules tabs are still a scroll away below the slip. */
+@media (max-width:1023px) and (orientation:portrait) {
+  .game-wrap {
+    height:max(30dvh, calc(100dvh - var(--hdr-h, 34px) - var(--slip-h, 420px) - 20px - env(safe-area-inset-bottom)));
+  }
+}
+/* Portrait phones: a compact slip so the game gets about three quarters of
+   the screen — slim Manual/Auto tabs, the landing pick on one row (its
+   value box, then the quick picks; the slider gives way), the two stakes
+   side by side with just − amount +, and a shorter bet button that also
+   carries the win and the chance (the payouts panel gives way). */
 @media (max-width:600px) and (orientation:portrait) {
-  .game-wrap { height:calc(80dvh - 36px - env(safe-area-inset-top)); }
+  .side-right { padding-top:6px; padding-bottom:calc(env(safe-area-inset-bottom) + 6px); }
+  .slip { gap:5px; }
+  .slip-tabs { padding:2px; border-radius:10px; }
+  .slip-tabs button { height:24px; font-size:11px; border-radius:8px; }
+  .slip-bet, .slip-pred, .slip-auto { padding:5px 6px; gap:4px; border-radius:11px; }
+
+  .slip-pred { flex-direction:row; align-items:center; }
+  .slip-pred-head .slip-label, .slip-range { display:none; }
+  .slip-pred-value { height:30px; padding:0 6px; }
+  .slip-pred-value input { width:38px; font-size:16px; }
+  .slip-pred-value span { font-size:12px; }
+  .slip-pred .slip-chips { flex:1; gap:3px; }
+  .slip-pred .slip-chips button { height:30px; font-size:12px; }
+
+  .slip-bet { flex-direction:row; align-items:center; gap:5px; }
+  .slip-bet > .slip-label { writing-mode:vertical-rl; transform:rotate(180deg); font-size:8.5px; letter-spacing:.12em; }
+  .slip-bet .slip-chips { display:none; }
+  .slip-stepper { flex:1; min-width:0; height:32px; gap:4px; }
+  .slip-bet .slip-stepper > button { width:30px; font-size:17px; border-radius:8px; }
+  .slip-amount { padding:0 6px; border-radius:8px; }
+  .slip-amount span { font-size:13px; }
+  .slip-amount input { font-size:17px; }
+
+  .slip-auto-grid { gap:4px; }
+  .slip-auto-grid span { font-size:8.5px; }
+  .slip-auto-grid input { height:28px; font-size:14px; }
+  .slip-auto > .slip-chips { display:none; }
+  .slip-auto-status { padding:5px 8px; gap:4px; }
+
+  .slip-payouts { display:none; }
+  .slip-cta { min-height:46px; padding:5px 10px; border-radius:13px; font-size:18px; gap:2px; }
+  .slip-cta small { font-size:10.5px; }
+  .slip-cta-odds { display:inline; }
+  .slip-warn, .slip-hint { font-size:10.5px; line-height:1.3; }
 }
 @media (max-width:360px) {
   .slip-pred .slip-chips button, .slip-auto .slip-chips button { font-size:12px; }

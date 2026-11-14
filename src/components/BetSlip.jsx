@@ -57,6 +57,11 @@ export default function BetSlip({
   const rounds = Math.min(500, Math.max(1, parseInt(auto.rounds, 10) || 1));
   const done = auto.total - auto.left;
 
+  // Phones hide the payouts panel to give the game the screen; the bet button
+  // carries the same numbers instead (see .slip-cta-odds in index.css).
+  const chancePct = chance >= 0.1 ? Math.round(chance * 100) : (chance * 100).toFixed(1);
+  const odds = <span className="slip-cta-odds"> · wins {money(floorCents(stake * target))} at {fmtMult(target)} · {chancePct}%</span>;
+
   let hint = '';
   if (serverNote) {
     hint = serverNote;
@@ -153,7 +158,7 @@ export default function BetSlip({
           </div>
           <div className="slip-payout t-close" title="Chance the crash point reaches your pick">
             <span className="slip-payout-top"><i aria-hidden="true">🎲</i>Chance</span>
-            <b>{chance >= 0.1 ? Math.round(chance * 100) : (chance * 100).toFixed(1)}%</b>
+            <b>{chancePct}%</b>
             <small>96% RTP</small>
           </div>
         </div>
@@ -162,10 +167,10 @@ export default function BetSlip({
       {tab === 'auto' ? (
         auto.active
           ? <button type="button" className="slip-cta is-stop" onClick={auto.onStop}>Stop auto<small>{auto.left} round{auto.left === 1 ? '' : 's'} left</small></button>
-          : <button type="button" className="slip-cta is-auto" disabled={!auto.canStart} onClick={auto.onStart}>Start auto<small>{rounds} round{rounds === 1 ? '' : 's'} · {money(stake)} a round</small></button>
+          : <button type="button" className="slip-cta is-auto" disabled={!auto.canStart} onClick={auto.onStart}>Start auto<small>{rounds} round{rounds === 1 ? '' : 's'} · {money(stake)} a round{odds}</small></button>
       ) : (
         <button type="button" className="slip-cta" disabled={betDisabled} onClick={onPlaceBet}>
-          {phase === 'idle' ? 'Place bet' : 'Bike in play'}<small>{phase === 'idle' ? `${money(stake)} total stake` : 'Next bet opens after landing'}</small>
+          {phase === 'idle' ? 'Place bet' : 'Bike in play'}<small>{phase === 'idle' ? <>{money(stake)} total stake{odds}</> : 'Next bet opens after landing'}</small>
         </button>
       )}
       {hint && <div className="slip-hint">{hint}</div>}
